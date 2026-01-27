@@ -3,14 +3,17 @@
 // icon-color: red; icon-glyph: file-alt;
 
 /**
- * Le CDF/EFK au Parlement – Interpellations mentionnant le CDF/EFK
- * - Langue auto selon iOS (preferredLanguages -> language -> locale)
- * - Data via ws-old.parlament.ch (évite le HTML Curia Vista dynamique)
- * - Affichage:
- *    1) Titre centré
- *    2) Nouveautés (numéros sur 1 ligne) ou ❌
- *    3) 3 dernières: numéro — titre + "NOM (Parti)" si possible
- * - Tap: ouvre la recherche Curia Vista (parlament.ch)
+ * Widget Curia Vista - Interpellations mentionnant CDF/EFK
+ * Langue: automatique selon la langue iOS (Device.language())
+ *
+ * IMPORTANT:
+ * - La recherche se fait UNIQUEMENT via les 2 URLs fournies par l'utilisateur (FR/DE)
+ *
+ * Affichage:
+ *  - Titre centré en haut
+ *  - Ligne "nouveautés": numéros (sur 1 ligne) ou ❌
+ *  - 3 dernières interpellations: numéro + titre + "Nom (Parti)" si possible
+ * Tap -> ouvre la recherche Curia Vista (URL exacte FR/DE)
  */
 
 const UPDATE_HOUR = 0;
@@ -19,222 +22,264 @@ const UPDATE_MINUTE = 30;
 const CFG = {
   fr: {
     title: "Le CDF au Parlement",
-    curiaUrl:
-      'https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista#k=%22Contr%C3%B4le%20f%C3%A9d%C3%A9ral%20des%20finances%22',
-    searchText: "Contrôle fédéral des finances",
-    langParam: "fr",
-    typeNeedle: "interpellation", // pour matcher "Interpellation" en FR
+    // URL EXACTE fournie
+    url: 'https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista#k=%22Contr%C3%B4le%20f%C3%A9d%C3%A9ral%20des%20finances%22',
+    acceptLang: "fr-CH,fr;q=0.9",
+    authorKeys: ["auteur", "auteure", "autrice", "auteur/trice", "auteur·e", "déposant", "déposante"],
   },
   de: {
     title: "Die EFK im Parlament",
-    curiaUrl:
-      'https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista#k=%22Eidgen%C3%B6ssische%20Finanzkontrolle%22#l=1033',
-    searchText: "Eidgenössische Finanzkontrolle",
-    langParam: "de",
-    typeNeedle: "interpellation", // en DE aussi "Interpellation"
+    // URL EXACTE fournie
+    url: 'https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista#k=%22Eidgen%C3%B6ssische%20Finanzkontrolle%22#l=1033',
+    acceptLang: "de-CH,de;q=0.9",
+    authorKeys: ["urheber", "urheber/in", "einreicher", "einreicherin"],
   },
 };
 
-// ----------------- Lang auto (robuste) -----------------
+// ---------- Utils ----------
 function pickLangAuto() {
-  try {
-    if (Device.preferredLanguages) {
-      const prefs = Device.preferredLanguages() || [];
-      const first = prefs.map((x) => String(x).toLowerCase());
-      if (first.find((x) => x.startsWith("fr"))) return "fr";
-      if (first.find((x) => x.startsWith("de"))) return "de";
-    }
-  } catch (_) {}
-
-  const lang = String(Device.language() || "").toLowerCase();
-  if (lang.startsWith("fr")) return "fr";
-  if (lang.startsWith("de")) return "de";
-
-  const loc = String(Device.locale() || "").toLowerCase(); // ex: fr_CH / de_CH
-  if (loc.startsWith("fr")) return "fr";
-  if (loc.startsWith("de")) return "de";
-
+  const ui = (Device.language() || "").toLowerCase();
+  if (ui.startsWith("de")) return "de";
   return "fr";
-}
-
-// ----------------- Cache -----------------
-const fm = FileManager.local();
-const dir = fm.joinPath(fm.documentsDirectory(), "cdf-efk-curiavista");
-if (!fm.fileExists(dir)) fm.createDirectory(dir, true);
-
-function p(name) {
-  return fm.joinPath(dir, name);
-}
-function loadJSON(path, fallback) {
-  try {
-    if (!fm.fileExists(path)) return fallback;
-    return JSON.parse(fm.readString(path));
-  } catch {
-    return fallback;
-  }
-}
-function saveJSON(path, obj) {
-  fm.writeString(path, JSON.stringify(obj));
-}
-function loadString(path, fallback = "") {
-  try {
-    if (!fm.fileExists(path)) return fallback;
-    return fm.readString(path);
-  } catch {
-    return fallback;
-  }
-}
-function saveString(path, s) {
-  fm.writeString(path, String(s));
 }
 
 function nowISO() {
   return new Date().toISOString();
 }
-function shouldUpdate(lastUpdateISO) {
-  const now = new Date();
-  const last = lastUpdateISO ? new Date(lastUpdateISO) : new Date(0);
-  const todayUpdate = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    UPDATE_HOUR,
-    UPDATE_MINUTE
-  );
 
-  // pas de cache -> update
-  if (!lastUpdateISO) return true;
-
-  // update 1x/jour après l'heure choisie
-  if (now >= todayUpdate && last < todayUpdate) return true;
-
-  return false;
+function decodeHtmlEntities(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#039;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, code) => {
+      try { return String.fromCharCode(parseInt(code, 10)); } catch { return _; }
+    })
+    .replace(/[’‘‛]/g, "'")
+    .trim();
 }
 
-// ----------------- Helpers texte -----------------
+function stripTags(html) {
+  return decodeHtmlEntities(String(html || "").replace(/<[^>]*>/g, " "));
+}
+
 function normalizeSpace(s) {
   return String(s || "")
     .replace(/\s+/g, " ")
+    .replace(/\s+\|\s+/g, " | ")
     .trim();
 }
+
 function clamp(s, max) {
   const x = String(s || "");
   if (x.length <= max) return x;
   return x.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
 }
 
-// "Nom (Parti)" à partir des infos councillor/party de l’API
-function formatSurnamePartyFromAffair(affair) {
-  try {
-    const c = affair?.author?.councillor;
-    if (!c) return "";
+// "Nom (Parti)" à partir d'une chaîne auteur (souvent: "Prénom Nom (SP, ZH)")
+function formatAuthorSurnameParty(authorRaw) {
+  const raw = normalizeSpace(authorRaw);
+  if (!raw) return "";
 
-    const lastName = normalizeSpace(c.lastName || c.lastname || c.name || "");
-    // Party: selon les objets, ça peut être party.abbreviation OU party.name
-    const party =
-      normalizeSpace(affair?.author?.party?.abbreviation) ||
-      normalizeSpace(affair?.author?.party?.name) ||
-      normalizeSpace(c?.party?.abbreviation) ||
-      normalizeSpace(c?.party?.name) ||
-      "";
+  const first = raw.split(" / ")[0].split(";")[0].split(" | ")[0].trim();
 
-    if (lastName && party) return `${lastName} (${party})`;
-    return lastName || "";
-  } catch {
-    return "";
-  }
-}
-
-// ----------------- Fetch via ws-old -----------------
-async function httpGetJSON(url) {
-  const req = new Request(url);
-  req.method = "GET";
-  // ws-old accepte ?format=json
-  return await req.loadJSON();
-}
-
-/**
- * 1) recherche ids via /affairs?searchTextFilter=...
- * 2) pour les ids récents, fetch détails /affairs/<id>...
- * 3) filtre type = interpellation
- * 4) garde top N (par updated desc)
- */
-async function fetchInterpellations(cfg) {
-  // Résultats "liste": typiquement [{id, updated, shortId, hasMorePages?}, ...]
-  const listUrl =
-    `https://ws-old.parlament.ch/affairs?format=json` +
-    `&lang=${encodeURIComponent(cfg.langParam)}` +
-    `&pageNumber=1` +
-    `&searchTextFilter=${encodeURIComponent(cfg.searchText)}`;
-
-  const list = await httpGetJSON(listUrl);
-
-  // Sécurise: ne traite que les premiers 50 IDs
-  const ids = (Array.isArray(list) ? list : [])
-    .map((x) => x?.id)
-    .filter(Boolean)
-    .slice(0, 50);
-
-  const details = [];
-  for (const id of ids) {
-    try {
-      const d = await httpGetJSON(
-        `https://ws-old.parlament.ch/affairs/${id}?format=json&lang=${encodeURIComponent(
-          cfg.langParam
-        )}`
-      );
-
-      const typeName = normalizeSpace(d?.type?.name || d?.typeName || "");
-      if (!typeName.toLowerCase().includes(cfg.typeNeedle)) continue;
-
-      // numéro (shortId) : souvent d.shortId, sinon "id" n'est pas le format 24.1234
-      const num = normalizeSpace(d?.shortId || d?.shortID || "");
-
-      // titre
-      const title = normalizeSpace(d?.title || d?.titles?.[0]?.value || "");
-
-      // auteur NOM (Parti)
-      const author = formatSurnamePartyFromAffair(d);
-
-      // date de maj (pour trier)
-      const updated = d?.updated || "";
-
-      // lien affaire sur parlament.ch (détails Curia Vista)
-      const affairLink =
-        (d?.links && d.links.find((l) => (l?.url || "").includes("parlament.ch"))?.url) ||
-        (num
-          ? `https://www.parlament.ch/${cfg.langParam}/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=${encodeURIComponent(
-              String(id)
-            )}`
-          : "");
-
-      details.push({ id, num, title, author, updated, affairLink });
-    } catch (_) {
-      // ignore
+  let party = "";
+  const paren = first.match(/\(([^)]+)\)/);
+  if (paren && paren[1]) {
+    const inside = normalizeSpace(paren[1]);
+    const firstPart = inside.split(",")[0].trim();
+    if (/^[A-ZÄÖÜ]{1,6}(-[A-ZÄÖÜ]{1,6})?$/.test(firstPart)) {
+      party = firstPart;
+    } else {
+      const m = firstPart.match(/[A-ZÄÖÜ]{1,6}(?:-[A-ZÄÖÜ]{1,6})?/);
+      if (m) party = m[0];
     }
   }
 
-  // tri: updated desc
-  details.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
+  const noParen = normalizeSpace(first.replace(/\([^)]*\)/g, "").trim());
+  const cleaned = noParen.replace(/^(auteur|auteure|autrice|déposant|déposante|urheber|einreicher)\s*:?/i, "").trim();
 
-  return details;
+  const tokens = cleaned.split(" ").filter(Boolean);
+  const surname = tokens.length ? tokens[tokens.length - 1] : cleaned;
+
+  if (!surname) return "";
+  return party ? `${surname} (${party})` : surname;
 }
 
-// ----------------- UI -----------------
+function extractAuthorFromText(text, authorKeys) {
+  const original = normalizeSpace(text);
+  const lower = (" " + original.toLowerCase() + " ");
+
+  for (const key of authorKeys) {
+    const k = " " + key.toLowerCase() + " ";
+    const idx = lower.indexOf(k);
+    if (idx !== -1) {
+      const start = Math.max(0, idx);
+      const tail = original.slice(start, start + 260);
+
+      const parts = tail.split(":");
+      const candidate = normalizeSpace(
+        (parts.length > 1 ? parts.slice(1).join(":") : tail)
+          .replace(new RegExp(key, "i"), "")
+          .trim()
+      );
+
+      const cut = candidate.split(" | ")[0].split(" - ")[0].split(" / ")[0].trim();
+      if (cut && cut.length > 2) return cut;
+    }
+  }
+  return "";
+}
+
+function extractTitleFromSnippet(snippetHtml, num) {
+  const afterIdx = snippetHtml.indexOf(num);
+  const slice = afterIdx >= 0 ? snippetHtml.slice(afterIdx, afterIdx + 1400) : snippetHtml;
+
+  const aRe = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = aRe.exec(slice)) !== null) {
+    const txt = normalizeSpace(stripTags(m[1]));
+    if (!txt) continue;
+    if (txt === num) continue;
+    if (txt.length < 6) continue;
+    if (/^(details|détails|pdf|weiter|mehr)$/i.test(txt)) continue;
+    return txt;
+  }
+
+  const text = normalizeSpace(stripTags(slice));
+  const cleaned = normalizeSpace(text.replace(num, "").trim());
+  return cleaned.split(" | ")[0].split(" - ")[0].trim();
+}
+
+// ---------- Fetcher / Cache ----------
+class CuriaVistaFetcher {
+  constructor(cfg, key) {
+    this.cfg = cfg;
+    this.key = key;
+
+    this.fm = FileManager.local();
+    this.dir = this.fm.joinPath(this.fm.documentsDirectory(), "cdf-efk-curiavista");
+    if (!this.fm.fileExists(this.dir)) this.fm.createDirectory(this.dir, true);
+
+    this.cacheItemsPath = this.fm.joinPath(this.dir, `cacheItems_${key}.json`); // [{num,title,author}]
+    this.lastUpdatePath = this.fm.joinPath(this.dir, `lastUpdate_${key}.txt`);
+    this.seenNumsPath = this.fm.joinPath(this.dir, `seenNums_${key}.json`); // [num]
+    this.lastNewNumsPath = this.fm.joinPath(this.dir, `lastNewNums_${key}.json`); // [num]
+  }
+
+  loadJSON(path, fallback) {
+    if (!this.fm.fileExists(path)) return fallback;
+    try { return JSON.parse(this.fm.readString(path)); } catch { return fallback; }
+  }
+
+  saveJSON(path, obj) {
+    try { this.fm.writeString(path, JSON.stringify(obj)); return true; } catch { return false; }
+  }
+
+  getLastUpdateDate() {
+    if (!this.fm.fileExists(this.lastUpdatePath)) return new Date(0);
+    try { return new Date(this.fm.readString(this.lastUpdatePath)); } catch { return new Date(0); }
+  }
+
+  shouldUpdate() {
+    const now = new Date();
+    const lastUpdate = this.getLastUpdateDate();
+    const todayUpdate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), UPDATE_HOUR, UPDATE_MINUTE);
+
+    if (!this.fm.fileExists(this.cacheItemsPath)) return true;
+    if (now >= todayUpdate && lastUpdate < todayUpdate) return true;
+
+    return false;
+  }
+
+  async fetchHTML() {
+    // IMPORTANT: utilise EXACTEMENT cfg.url (tes URLs)
+    const req = new Request(this.cfg.url);
+    req.headers = {
+      "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+      "Accept-Language": this.cfg.acceptLang,
+    };
+    return await req.loadString();
+  }
+
+  parseInterpellations(html) {
+    const items = [];
+    if (!html) return items;
+
+    const numRe = /\b(\d{2}\.\d{4})\b/g;
+    const matches = [...html.matchAll(numRe)];
+    if (matches.length === 0) return items;
+
+    for (const m of matches) {
+      const num = m[1];
+      const idx = m.index ?? -1;
+      if (idx < 0) continue;
+
+      const start = Math.max(0, idx - 900);
+      const end = Math.min(html.length, idx + 2000);
+      const snippetHtml = html.slice(start, end);
+      const snippetTextLower = normalizeSpace(stripTags(snippetHtml)).toLowerCase();
+
+      if (!snippetTextLower.includes("interpellation")) continue;
+      if (items.some((it) => it.num === num)) continue;
+
+      const title = extractTitleFromSnippet(snippetHtml, num);
+      const authorRaw = extractAuthorFromText(stripTags(snippetHtml), this.cfg.authorKeys);
+      const author = formatAuthorSurnameParty(authorRaw);
+
+      items.push({
+        num,
+        title: normalizeSpace(title),
+        author: normalizeSpace(author),
+      });
+    }
+
+    return items;
+  }
+
+  loadItemsCache() { return this.loadJSON(this.cacheItemsPath, []); }
+  loadSeenNums() { return this.loadJSON(this.seenNumsPath, []); }
+  saveSeenNums(arr) { this.saveJSON(this.seenNumsPath, arr); }
+
+  loadLastNewNums() { return this.loadJSON(this.lastNewNumsPath, []); }
+  saveLastNewNums(arr) { this.saveJSON(this.lastNewNumsPath, arr); }
+
+  async getItemsAndMaybeUpdate() {
+    const cached = this.loadItemsCache();
+
+    if (!this.shouldUpdate()) return { items: cached, didUpdate: false };
+
+    try {
+      const html = await this.fetchHTML();
+      const items = this.parseInterpellations(html);
+
+      if (items.length > 0) {
+        this.saveJSON(this.cacheItemsPath, items);
+        this.fm.writeString(this.lastUpdatePath, nowISO());
+        return { items, didUpdate: true };
+      }
+
+      return { items: cached, didUpdate: false };
+    } catch (e) {
+      console.error("fetch error:", e);
+      return { items: cached, didUpdate: false };
+    }
+  }
+}
+
+// ---------- UI ----------
 function addCenteredTitle(w, text) {
   const t = w.addText(text);
   t.font = Font.boldSystemFont(14);
   t.centerAlignText();
 }
-function addLine(w, text, opts = {}) {
-  const {
-    bold = false,
-    centered = false,
-    size = 12,
-    color = null,
-    lineLimit = 1,
-  } = opts;
-  const t = w.addText(String(text));
+
+function addLine(w, text, { bold = false, centered = false, size = 12, color = null, lineLimit = 1 } = {}) {
+  const t = w.addText(text);
   t.font = bold ? Font.boldSystemFont(size) : Font.systemFont(size);
   t.lineLimit = lineLimit;
   if (centered) t.centerAlignText();
@@ -242,86 +287,55 @@ function addLine(w, text, opts = {}) {
   return t;
 }
 
-// ----------------- Main -----------------
+// ---------- Main ----------
 const lang = pickLangAuto();
 const cfg = CFG[lang];
 
-// fichiers cache par langue
-const cacheItemsPath = p(`cacheItems_${lang}.json`); // [{num,title,author,updated,id,affairLink}]
-const lastUpdatePath = p(`lastUpdate_${lang}.txt`);
-const seenNumsPath = p(`seenNums_${lang}.json`);
-const lastNewNumsPath = p(`lastNewNums_${lang}.json`);
+const fetcher = new CuriaVistaFetcher(cfg, lang);
+const { items: allItems, didUpdate } = await fetcher.getItemsAndMaybeUpdate();
 
-let items = loadJSON(cacheItemsPath, []);
-const lastUpdateISO = loadString(lastUpdatePath, "");
-
-let didUpdate = false;
-if (shouldUpdate(lastUpdateISO) || !items.length) {
-  try {
-    items = await fetchInterpellations(cfg);
-    saveJSON(cacheItemsPath, items);
-    saveString(lastUpdatePath, nowISO());
-    didUpdate = true;
-  } catch (e) {
-    // garde le cache si fetch échoue
-  }
-}
-
-// nouveautés vs "hier"
-const numsNow = items.map((x) => x.num).filter(Boolean);
-let newNumsToShow = loadJSON(lastNewNumsPath, []);
+const numsNow = (allItems || []).map((x) => x.num);
+let newNumsToShow = fetcher.loadLastNewNums();
 
 if (didUpdate) {
-  const seen = loadJSON(seenNumsPath, []);
-  const newNums = numsNow.filter((n) => !seen.includes(n));
-  saveJSON(lastNewNumsPath, newNums);
-  saveJSON(seenNumsPath, numsNow);
+  const seenNums = fetcher.loadSeenNums();
+  const newNums = numsNow.filter((n) => !seenNums.includes(n));
+  fetcher.saveLastNewNums(newNums);
+  fetcher.saveSeenNums(numsNow);
   newNumsToShow = newNums;
 }
 
-// 3 dernières
-const last3 = items.slice(0, 3);
+const last3 = (allItems || []).slice(0, 3);
 
-// Widget
 const w = new ListWidget();
-w.url = cfg.curiaUrl;
+// IMPORTANT: clic = URL exacte FR/DE
+w.url = cfg.url;
+
 w.setPadding(6, 12, 12, 12);
 
 addCenteredTitle(w, cfg.title);
 w.addSpacer(6);
 
-// Nouveautés
 if (newNumsToShow && newNumsToShow.length > 0) {
-  addLine(w, newNumsToShow.join(" / "), {
-    bold: true,
-    centered: true,
-    size: 12,
-    lineLimit: 1,
-  });
+  addLine(w, newNumsToShow.join(" / "), { bold: true, centered: true, size: 12, lineLimit: 1 });
 } else {
   addLine(w, "❌", { bold: true, centered: true, size: 12 });
 }
 
 w.addSpacer(8);
 
-// 3 dernières: num — titre + auteur
-if (!last3.length) {
+if (last3.length === 0) {
   addLine(w, "—", { size: 12 });
 } else {
   for (const it of last3) {
-    const header =
-      it.num && it.title
-        ? `${it.num} — ${clamp(it.title, 60)}`
-        : it.num || clamp(it.title, 60) || "—";
+    const num = it.num || "";
+    const title = it.title ? clamp(it.title, 60) : "";
+    const author = it.author ? clamp(it.author, 40) : "";
+
+    const header = title ? `${num} — ${title}` : num;
     addLine(w, header, { bold: true, size: 11, lineLimit: 1 });
 
-    if (it.author) {
-      addLine(w, clamp(it.author, 40), {
-        size: 10,
-        color: Color.gray(),
-        lineLimit: 1,
-      });
-    }
+    if (author) addLine(w, author, { size: 10, color: Color.gray(), lineLimit: 1 });
 
     w.addSpacer(4);
   }
