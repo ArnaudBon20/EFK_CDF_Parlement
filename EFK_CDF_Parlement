@@ -71,9 +71,9 @@ const LANG = detectLangAuto();
 const cfg = CFG[LANG];
 
 // ----------------- Couleurs dynamiques (Light/Dark) -----------------
-const BG = Color.dynamic(new Color("#FFFFFF"), new Color("#000000"));
-const TEXT_PRIMARY = Color.dynamic(new Color("#111111"), new Color("#FFFFFF"));
-const TEXT_SECONDARY = Color.dynamic(new Color("#666666"), new Color("#BBBBBB"));
+const BG = Color.dynamic(new Color("#FFFFFF"), new Color("#1C1C1E"));
+const TEXT_PRIMARY = Color.dynamic(new Color("#000000"), new Color("#FFFFFF"));
+const TEXT_SECONDARY = Color.dynamic(new Color("#666666"), new Color("#AAAAAA"));
 const ACCENT = Color.dynamic(new Color("#E30613"), new Color("#FF6B6B"));
 
 // ----------------- Cache -----------------
@@ -157,13 +157,15 @@ async function tryFetchAffairsPage(pageNumber) {
   try {
     const data = await fetchJSON(url);
     return Array.isArray(data) ? data : null;
-  } catch (_) {
+  } catch (e) {
+    console.error(`[ERROR] Échec fetch page ${pageNumber}: ${e}`);
     return null;
   }
 }
 
 // Trouver la dernière page (la plus récente)
 async function findLastPage() {
+  console.log("[DEBUG] Recherche de la dernière page...");
   let low = 1;
   let high = 1;
 
@@ -202,12 +204,18 @@ async function findLastPage() {
     }
   }
 
+  console.log(`[DEBUG] Dernière page trouvée: ${best}`);
   return best;
 }
 
 async function fetchAffairById(id) {
   const url = `${API_BASE}/affairs/${id}?format=json&lang=${encodeURIComponent(cfg.apiLang)}`;
-  return await fetchJSON(url);
+  try {
+    return await fetchJSON(url);
+  } catch (e) {
+    console.error(`[ERROR] Échec fetch affair ${id}: ${e}`);
+    throw e;
+  }
 }
 
 async function fetchCouncillorParty(councillorId) {
@@ -258,6 +266,7 @@ function getAuthorSurname(affair) {
 async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
   const lastPage = await findLastPage();
   const matches = [];
+  console.log(`[DEBUG] Recherche de matches depuis page ${lastPage} (max ${maxPagesBack} pages en arrière)`);
 
   for (let p = lastPage; p >= Math.max(1, lastPage - maxPagesBack); p--) {
     const pageList = await tryFetchAffairsPage(p);
@@ -294,8 +303,12 @@ async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
         author: authorSurname,
         party: party ? normalize(party) : null,
       });
+      console.log(`[DEBUG] Match trouvé: ${shortId} - ${title.substring(0, 40)}...`);
 
-      if (matches.length >= maxMatches) return matches;
+      if (matches.length >= maxMatches) {
+        console.log(`[DEBUG] Max matches atteint (${maxMatches})`);
+        return matches;
+      }
     }
   }
 
@@ -353,15 +366,21 @@ w.addSpacer(8);
 // Fetch (sinon fallback cache)
 let fetched = [];
 let fetchOk = false;
+let errorMsg = "";
 try {
+  console.log("[DEBUG] Début du fetch...");
   fetched = await getLatestMatches(12, 10);
   fetchOk = Array.isArray(fetched);
-} catch (_) {
+  console.log(`[DEBUG] Fetch OK: ${fetchOk}, Résultats: ${fetched.length}`);
+} catch (e) {
   fetchOk = false;
+  errorMsg = String(e);
+  console.error(`[ERROR] Fetch échoué: ${errorMsg}`);
 }
 
 let items = (fetchOk && fetched.length) ? fetched : readJSON(PATH_CACHE_ITEMS, []);
 if (!Array.isArray(items)) items = [];
+console.log(`[DEBUG] Items à afficher: ${items.length}`);
 
 // Sauver cache si on a des résultats
 if (fetchOk && fetched.length) writeJSON(PATH_CACHE_ITEMS, fetched);
@@ -399,14 +418,26 @@ w.addSpacer(10);
 const last3 = items.slice(0, 3);
 
 if (!last3.length) {
-  const t = w.addText(fetchOk ? (LANG === "fr" ? "Aucun résultat." : "Keine Resultate.") : (LANG === "fr" ? "Erreur réseau / API." : "Netzwerk-/API-Fehler."));
-  t.font = Font.systemFont(12);
-  t.textColor = TEXT_SECONDARY;
+  console.warn("[WARN] Aucun résultat à afficher!");
+  const msg = fetchOk ? (LANG === "fr" ? "Aucun résultat trouvé." : "Keine Resultate.") : (LANG === "fr" ? "Erreur réseau / API" : "Netzwerk-/API-Fehler");
+  const t = w.addText(msg);
+  t.font = Font.boldSystemFont(13);
+  t.textColor = ACCENT;
 
-  const hint = w.addText(LANG === "fr" ? "Ouvre Scriptable > ton script > Run pour voir le log." : "Starte das Script in Scriptable, um das Log zu sehen.");
-  hint.font = Font.systemFont(10);
-  hint.textColor = TEXT_SECONDARY;
-  hint.lineLimit = 2;
+  w.addSpacer(6);
+  
+  const hint = w.addText(LANG === "fr" ? "Ouvre Scriptable et lance le script pour voir les logs de debug." : "Öffne Scriptable und starte das Script für Debug-Logs.");
+  hint.font = Font.systemFont(11);
+  hint.textColor = TEXT_PRIMARY;
+  hint.lineLimit = 3;
+  
+  if (errorMsg) {
+    w.addSpacer(6);
+    const err = w.addText(`Erreur: ${clamp(errorMsg, 80)}`);
+    err.font = Font.systemFont(9);
+    err.textColor = TEXT_SECONDARY;
+    err.lineLimit = 2;
+  }
 } else {
   for (let i = 0; i < last3.length; i++) {
     addItemBlock(w, last3[i]);
