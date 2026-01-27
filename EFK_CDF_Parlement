@@ -20,6 +20,7 @@
 
 const UPDATE_HOUR = 0;
 const UPDATE_MINUTE = 30;
+const CACHE_VALIDITY_HOURS = 6;
 
 // --- URLs Curia Vista (clic) : EXACTES ---
 const CV_FR =
@@ -85,6 +86,7 @@ const PATH_CACHE_ITEMS = fm.joinPath(dir, `cache_items_${LANG}.json`);   // [{sh
 const PATH_SEEN_IDS = fm.joinPath(dir, `seen_ids_${LANG}.json`);         // [shortId...]
 const PATH_LAST_NEW = fm.joinPath(dir, `last_new_${LANG}.json`);         // [shortId...]
 const PATH_LAST_UPDATE = fm.joinPath(dir, `last_update_${LANG}.txt`);    // ISO date
+const PATH_LAST_FETCH = fm.joinPath(dir, `last_fetch_${LANG}.txt`);      // ISO date du dernier fetch
 
 function readJSON(path, fallback) {
   try {
@@ -120,6 +122,13 @@ function shouldDoDailyUpdate() {
   return now >= todayUpdate && last < todayUpdate;
 }
 
+function isCacheValid() {
+  const now = new Date();
+  const lastFetch = new Date(readText(PATH_LAST_FETCH, "1970-01-01T00:00:00.000Z"));
+  const hoursSinceLastFetch = (now - lastFetch) / (1000 * 60 * 60);
+  return hoursSinceLastFetch < CACHE_VALIDITY_HOURS;
+}
+
 // ----------------- Helpers texte -----------------
 function normalize(s) {
   return String(s || "").replace(/\s+/g, " ").trim();
@@ -148,7 +157,7 @@ async function fetchJSON(url) {
     "Accept-Language": cfg.acceptLang,
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
   };
-  req.timeoutInterval = 15;
+  req.timeoutInterval = 10;
   
   try {
     const response = await req.loadString();
@@ -173,13 +182,12 @@ async function tryFetchAffairsPage(pageNumber) {
   }
 }
 
-// Trouver la dernière page (la plus récente)
-async function findLastPage() {
-  console.log("[DEBUG] Recherche de la dernière page...");
+// Trouver une page valide rapidement
+async function findValidPage() {
+  console.log("[DEBUG] Recherche d'une page valide...");
   
-  // Stratégie simplifiée : tester des pages récentes connues pour fonctionner
-  // L'API parlament.ch a des problèmes avec certaines pages hautes
-  const testPages = [700, 600, 500, 400, 300, 200, 100, 50, 1];
+  // Tester seulement quelques pages pour gagner du temps
+  const testPages = [500, 300, 100, 1];
   
   for (let testPage of testPages) {
     const data = await tryFetchAffairsPage(testPage);
@@ -248,42 +256,47 @@ function getAuthorSurname(affair) {
   return "—";
 }
 
-async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
-  const lastPage = await findLastPage();
+async function getLatestMatches(maxMatches = 6, maxPagesBack = 3) {
+  const startPage = await findValidPage();
   const matches = [];
-  console.log(`[DEBUG] Recherche de matches depuis page ${lastPage} (max ${maxPagesBack} pages en arrière)`);
+  console.log(`[DEBUG] Recherche de matches depuis page ${startPage} (max ${maxPagesBack} pages)`);
   
   let errorCount = 0;
-  const maxErrors = 5;
-  let pagesChecked = 0;
+  const maxErrors = 2;
+  let itemsChecked = 0;
+  const maxItemsToCheck = 30;
 
-  for (let p = lastPage; p >= Math.max(1, lastPage - maxPagesBack) && pagesChecked < maxPagesBack; p--) {
+  for (let p = startPage; p >= Math.max(1, startPage - maxPagesBack); p--) {
     if (errorCount >= maxErrors) {
-      console.warn(`[WARN] Trop d'erreurs (${errorCount}), arrêt de la recherche`);
+      console.warn(`[WARN] Trop d'erreurs (${errorCount}), arrêt`);
       break;
     }
     
-    pagesChecked++;
+    if (itemsChecked >= maxItemsToCheck) {
+      console.warn(`[WARN] Limite d'items atteinte (${maxItemsToCheck}), arrêt`);
+      break;
+    }
+    
     const pageList = await tryFetchAffairsPage(p);
     if (!pageList || pageList.length === 0) {
       errorCount++;
-      console.warn(`[WARN] Page ${p} vide ou erreur`);
       continue;
     }
     
     console.log(`[DEBUG] Page ${p}: ${pageList.length} items`);
 
-    for (let i = pageList.length - 1; i >= 0; i--) {
+    for (let i = pageList.length - 1; i >= 0 && itemsChecked < maxItemsToCheck; i--) {
       const item = pageList[i];
       const id = item?.id;
       if (!id) continue;
+      
+      itemsChecked++;
 
       let affair;
       try {
         affair = await fetchAffairById(id);
       } catch (e) {
         errorCount++;
-        console.warn(`[WARN] Skip affair ${id}: ${e}`);
         continue;
       }
 
@@ -298,7 +311,13 @@ async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
 
       let party = null;
       const councillorId = affair?.author?.councillor?.id;
-      if (councillorId) party = await fetchCouncillorParty(councillorId);
+      if (councillorId) {
+        try {
+          party = await fetchCouncillorParty(councillorId);
+        } catch (e) {
+          console.warn(`[WARN] Impossible de récupérer le parti pour ${councillorId}`);
+        }
+      }
 
       matches.push({
         shortId,
@@ -306,7 +325,7 @@ async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
         author: authorSurname,
         party: party ? normalize(party) : null,
       });
-      console.log(`[DEBUG] Match trouvé: ${shortId} - ${title.substring(0, 40)}...`);
+      console.log(`[DEBUG] Match trouvé: ${shortId}`);
 
       if (matches.length >= maxMatches) {
         console.log(`[DEBUG] Max matches atteint (${maxMatches})`);
@@ -370,23 +389,37 @@ w.addSpacer(8);
 let fetched = [];
 let fetchOk = false;
 let errorMsg = "";
-try {
-  console.log("[DEBUG] Début du fetch...");
-  fetched = await getLatestMatches(12, 10);
-  fetchOk = Array.isArray(fetched);
-  console.log(`[DEBUG] Fetch OK: ${fetchOk}, Résultats: ${fetched.length}`);
-} catch (e) {
-  fetchOk = false;
-  errorMsg = String(e);
-  console.error(`[ERROR] Fetch échoué: ${errorMsg}`);
+let usedCache = false;
+let items = [];
+
+// Vérifier si le cache est valide
+if (isCacheValid()) {
+  console.log("[DEBUG] Cache valide, utilisation du cache");
+  items = readJSON(PATH_CACHE_ITEMS, []);
+  usedCache = true;
+  fetchOk = true;
+} else {
+  console.log("[DEBUG] Cache expiré ou absent, fetch API...");
+  try {
+    fetched = await getLatestMatches(6, 3);
+    fetchOk = Array.isArray(fetched);
+    console.log(`[DEBUG] Fetch OK: ${fetchOk}, Résultats: ${fetched.length}`);
+  } catch (e) {
+    fetchOk = false;
+    errorMsg = String(e);
+    console.error(`[ERROR] Fetch échoué: ${errorMsg}`);
+  }
+
+  items = (fetchOk && fetched.length) ? fetched : readJSON(PATH_CACHE_ITEMS, []);
+  if (!Array.isArray(items)) items = [];
+  console.log(`[DEBUG] Items à afficher: ${items.length}`);
+
+  // Sauver cache si on a des résultats
+  if (fetchOk && fetched.length) {
+    writeJSON(PATH_CACHE_ITEMS, fetched);
+    writeText(PATH_LAST_FETCH, new Date().toISOString());
+  }
 }
-
-let items = (fetchOk && fetched.length) ? fetched : readJSON(PATH_CACHE_ITEMS, []);
-if (!Array.isArray(items)) items = [];
-console.log(`[DEBUG] Items à afficher: ${items.length}`);
-
-// Sauver cache si on a des résultats
-if (fetchOk && fetched.length) writeJSON(PATH_CACHE_ITEMS, fetched);
 
 // Liste IDs matchés "aujourd’hui"
 const matchedIdsToday = items.map(x => x.shortId).filter(Boolean);
