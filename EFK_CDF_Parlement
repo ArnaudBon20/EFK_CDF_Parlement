@@ -4,14 +4,18 @@
 
 /**
  * Le CDF au Parlement / Die EFK im Parlament
- * Source de données: Open Data Parlement (ws-old.parlament.ch) via JSON (pas de scraping Curia Vista).
+ * Source: Open Data Parlement (ws-old.parlament.ch) en JSON (pas de scraping Curia Vista).
  *
  * Affichage:
  * - Titre centré en haut
  * - Ligne "Nouveaux/Neu": numéros des nouvelles interpellations depuis la dernière mise à jour quotidienne, sinon ❌
  * - 3 dernières interpellations: numéro + titre + Nom (Parti) si possible
  *
- * Tap sur le widget -> ouvre tes URLs Curia Vista (FR/DE) EXACTES.
+ * Tap sur le widget -> ouvre les URLs Curia Vista (FR/DE) EXACTES.
+ *
+ * Fix design:
+ * - Couleurs dynamiques (Light/Dark) pour éviter le widget "tout noir"
+ * - Fallback texte visible si aucune donnée
  */
 
 const UPDATE_HOUR = 0;
@@ -26,7 +30,7 @@ const CV_DE =
 // --- Open Data / API ---
 const API_BASE = "https://ws-old.parlament.ch";
 
-// 8 = Interpellation, 9 = Interpellation urgente (selon l’API)
+// 8 = Interpellation, 9 = Interpellation urgente
 const INTERPELLATION_TYPE_IDS = new Set([8, 9]);
 
 const CFG = {
@@ -50,21 +54,27 @@ const CFG = {
 
 // ----------------- Langue auto iOS -----------------
 function detectLangAuto() {
-  // Pas de widgetParameter (auto uniquement)
   try {
     const pref = Device.preferredLanguages ? Device.preferredLanguages() : [];
     const first = (Array.isArray(pref) && pref.length ? String(pref[0]) : "").toLowerCase();
-    if (first.startsWith("de")) return "de";
     if (first.startsWith("fr")) return "fr";
+    if (first.startsWith("de")) return "de";
   } catch (_) {}
 
   const ui = (Device.language() || "").toLowerCase();
+  if (ui.startsWith("fr")) return "fr";
   if (ui.startsWith("de")) return "de";
   return "fr";
 }
 
 const LANG = detectLangAuto();
 const cfg = CFG[LANG];
+
+// ----------------- Couleurs dynamiques (Light/Dark) -----------------
+const BG = Color.dynamic(new Color("#FFFFFF"), new Color("#000000"));
+const TEXT_PRIMARY = Color.dynamic(new Color("#111111"), new Color("#FFFFFF"));
+const TEXT_SECONDARY = Color.dynamic(new Color("#666666"), new Color("#BBBBBB"));
+const ACCENT = Color.dynamic(new Color("#E30613"), new Color("#FF6B6B"));
 
 // ----------------- Cache -----------------
 const fm = FileManager.local();
@@ -106,10 +116,7 @@ function writeText(path, txt) {
 function shouldDoDailyUpdate() {
   const now = new Date();
   const last = new Date(readText(PATH_LAST_UPDATE, "1970-01-01T00:00:00.000Z"));
-
   const todayUpdate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), UPDATE_HOUR, UPDATE_MINUTE);
-
-  // si on a passé l'heure d'update aujourd'hui et qu'on n'a pas encore fait l'update d'aujourd'hui
   return now >= todayUpdate && last < todayUpdate;
 }
 
@@ -139,7 +146,6 @@ async function fetchJSON(url) {
   req.headers = {
     "Accept": "application/json",
     "Accept-Language": cfg.acceptLang,
-    // IMPORTANT: user-agent "navigateur" pour éviter des réponses vides/incomplètes
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
   };
   req.timeoutInterval = 25;
@@ -158,7 +164,6 @@ async function tryFetchAffairsPage(pageNumber) {
 
 // Trouver la dernière page (la plus récente)
 async function findLastPage() {
-  // Exponential search
   let low = 1;
   let high = 1;
 
@@ -172,10 +177,9 @@ async function findLastPage() {
     low = high;
     high *= 2;
 
-    if (high > 20000) break; // garde-fou
+    if (high > 20000) break;
   }
 
-  // Binary search
   let left = low + 1;
   let right = high - 1;
   let best = low;
@@ -211,13 +215,7 @@ async function fetchCouncillorParty(councillorId) {
   const url = `${API_BASE}/councillors/${councillorId}?format=json&lang=${encodeURIComponent(cfg.apiLang)}`;
   try {
     const c = await fetchJSON(url);
-    // différents schémas possibles selon l’API
-    return (
-      c?.party?.abbreviation ||
-      c?.partyAbbreviation ||
-      c?.party?.name ||
-      null
-    );
+    return c?.party?.abbreviation || c?.partyAbbreviation || c?.party?.name || null;
   } catch (_) {
     return null;
   }
@@ -239,19 +237,17 @@ function getShortId(affair, fallbackId) {
 }
 
 function getAuthorSurname(affair) {
-  // councillor
   const c = affair?.author?.councillor;
   if (c) {
     const name =
       c.officialDenomination ||
       c.officialDenominationWithTitle ||
       c.name ||
-      c.firstName + " " + c.lastName ||
+      [c.firstName, c.lastName].filter(Boolean).join(" ") ||
       "";
     return extractSurname(name);
   }
 
-  // committee (rare)
   const comm = affair?.author?.committee;
   if (comm?.abbreviation1) return normalize(comm.abbreviation1);
   if (comm?.name) return normalize(comm.name);
@@ -263,12 +259,10 @@ async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
   const lastPage = await findLastPage();
   const matches = [];
 
-  // on scanne depuis la fin, quelques pages en arrière
   for (let p = lastPage; p >= Math.max(1, lastPage - maxPagesBack); p--) {
     const pageList = await tryFetchAffairsPage(p);
     if (!pageList || pageList.length === 0) continue;
 
-    // du plus récent au plus ancien à l’intérieur de la page
     for (let i = pageList.length - 1; i >= 0; i--) {
       const item = pageList[i];
       const id = item?.id;
@@ -287,7 +281,7 @@ async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
       if (!affairContainsKeyword(affair, cfg.keyword)) continue;
 
       const shortId = getShortId(affair, String(id));
-      const title = stripHtml(affair?.title || "");
+      const title = normalize(stripHtml(affair?.title || ""));
       const authorSurname = getAuthorSurname(affair);
 
       let party = null;
@@ -296,7 +290,7 @@ async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
 
       matches.push({
         shortId,
-        title: normalize(title),
+        title,
         author: authorSurname,
         party: party ? normalize(party) : null,
       });
@@ -308,88 +302,76 @@ async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
   return matches;
 }
 
-// ----------------- Widget UI -----------------
+// ----------------- UI -----------------
 function addCenteredTitle(w, text) {
   const s = w.addStack();
   s.layoutHorizontally();
   s.addSpacer();
   const t = s.addText(text);
   t.font = Font.boldSystemFont(14);
-  t.textColor = new Color("#111111");
-  s.addSpacer();
-}
-
-function addCenteredLine(w, text, bold = false, color = null) {
-  const s = w.addStack();
-  s.layoutHorizontally();
-  s.addSpacer();
-  const t = s.addText(text);
-  t.font = bold ? Font.boldSystemFont(12) : Font.systemFont(12);
-  t.textColor = color || new Color("#111111");
-  t.lineLimit = 1;
+  t.textColor = TEXT_PRIMARY;
   s.addSpacer();
 }
 
 function addLabelValueLine(w, label, value, valueColor) {
   const s = w.addStack();
   s.layoutHorizontally();
+
   const l = s.addText(label);
   l.font = Font.boldSystemFont(11);
-  l.textColor = new Color("#666666");
+  l.textColor = TEXT_SECONDARY;
 
   const v = s.addText(value);
   v.font = Font.systemFont(11);
-  v.textColor = valueColor || new Color("#111111");
+  v.textColor = valueColor || TEXT_PRIMARY;
   v.lineLimit = 1;
 }
 
 function addItemBlock(w, it) {
-  // ligne 1: numéro — titre (1 ligne)
   const header = `${it.shortId} — ${clamp(it.title, 70)}`;
   const h = w.addText(header);
   h.font = Font.boldSystemFont(11);
-  h.textColor = new Color("#111111");
+  h.textColor = TEXT_PRIMARY;
   h.lineLimit = 1;
 
-  // ligne 2: Nom (Parti)
   const who = it.party ? `${it.author} (${it.party})` : it.author;
   const a = w.addText(clamp(who, 40));
   a.font = Font.systemFont(10);
-  a.textColor = new Color("#666666");
+  a.textColor = TEXT_SECONDARY;
   a.lineLimit = 1;
 }
 
 // ----------------- Main -----------------
 const w = new ListWidget();
-w.backgroundColor = new Color("#FFFFFF");
+w.backgroundColor = BG;
 w.url = cfg.openUrl; // clic -> Curia Vista (URL EXACTE)
 w.setPadding(6, 12, 12, 12);
 
-// titre centré haut
 addCenteredTitle(w, cfg.title);
 w.addSpacer(8);
 
-// On essaie de fetch; sinon fallback cache
+// Fetch (sinon fallback cache)
 let fetched = [];
+let fetchOk = false;
 try {
-  fetched = await getLatestMatches(12, 10); // récupère plusieurs matches pour détecter "nouveaux"
+  fetched = await getLatestMatches(12, 10);
+  fetchOk = Array.isArray(fetched);
 } catch (_) {
-  fetched = [];
+  fetchOk = false;
 }
 
-let items = Array.isArray(fetched) && fetched.length ? fetched : readJSON(PATH_CACHE_ITEMS, []);
+let items = (fetchOk && fetched.length) ? fetched : readJSON(PATH_CACHE_ITEMS, []);
 if (!Array.isArray(items)) items = [];
 
-// Sauver cache items si on a des résultats
-if (Array.isArray(fetched) && fetched.length) {
-  writeJSON(PATH_CACHE_ITEMS, fetched);
-}
+// Sauver cache si on a des résultats
+if (fetchOk && fetched.length) writeJSON(PATH_CACHE_ITEMS, fetched);
 
-// Liste des IDs matchés "aujourd’hui" (pour comparer)
+// Liste IDs matchés "aujourd’hui"
 const matchedIdsToday = items.map(x => x.shortId).filter(Boolean);
 
-// Daily update : calcule "nouveaux depuis hier" une fois par jour à l’heure définie
+// Daily update: calcule "nouveaux" une fois par jour
 let newIdsToShow = readJSON(PATH_LAST_NEW, []);
+if (!Array.isArray(newIdsToShow)) newIdsToShow = [];
 
 if (shouldDoDailyUpdate()) {
   const seen = readJSON(PATH_SEEN_IDS, []);
@@ -404,23 +386,27 @@ if (shouldDoDailyUpdate()) {
   newIdsToShow = newIds;
 }
 
-// Ligne “Nouveaux/Neu”
-if (Array.isArray(newIdsToShow) && newIdsToShow.length) {
-  // sur une ligne, uniquement les numéros
-  addLabelValueLine(w, `${cfg.labelNew}: `, newIdsToShow.join(" / "), new Color("#E30613"));
+// Ligne Nouveaux/Neu
+if (newIdsToShow.length) {
+  addLabelValueLine(w, `${cfg.labelNew}: `, newIdsToShow.join(" / "), ACCENT);
 } else {
-  addLabelValueLine(w, `${cfg.labelNew}: `, "❌", new Color("#666666"));
+  addLabelValueLine(w, `${cfg.labelNew}: `, "❌", TEXT_SECONDARY);
 }
 
 w.addSpacer(10);
 
-// 3 dernières interpellations (les plus récentes matchées)
+// 3 dernières
 const last3 = items.slice(0, 3);
 
 if (!last3.length) {
-  const t = w.addText(LANG === "fr" ? "Aucune interpellation trouvée." : "Keine Interpellation gefunden.");
+  const t = w.addText(fetchOk ? (LANG === "fr" ? "Aucun résultat." : "Keine Resultate.") : (LANG === "fr" ? "Erreur réseau / API." : "Netzwerk-/API-Fehler."));
   t.font = Font.systemFont(12);
-  t.textColor = new Color("#666666");
+  t.textColor = TEXT_SECONDARY;
+
+  const hint = w.addText(LANG === "fr" ? "Ouvre Scriptable > ton script > Run pour voir le log." : "Starte das Script in Scriptable, um das Log zu sehen.");
+  hint.font = Font.systemFont(10);
+  hint.textColor = TEXT_SECONDARY;
+  hint.lineLimit = 2;
 } else {
   for (let i = 0; i < last3.length; i++) {
     addItemBlock(w, last3[i]);
