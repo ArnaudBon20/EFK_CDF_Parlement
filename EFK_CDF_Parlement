@@ -9,7 +9,7 @@
  * Affichage:
  *  - Titre centré en haut
  *  - Ligne "nouveautés": numéros (sur 1 ligne) ou ❌
- *  - 3 dernières interpellations: numéro + titre + auteur
+ *  - 3 dernières interpellations: numéro + titre + "Nom (Parti)" si possible
  * Tap -> ouvre la recherche Curia Vista
  */
 
@@ -33,7 +33,7 @@ const CFG = {
 
 // ---------- Utils ----------
 function pickLangAuto() {
-  const ui = (Device.language() || "").toLowerCase();
+  const ui = (Device.language() || "").toLowerCase(); // langue UI iOS
   if (ui.startsWith("de")) return "de";
   return "fr";
 }
@@ -73,18 +73,71 @@ function normalizeSpace(s) {
     .trim();
 }
 
+function clamp(s, max) {
+  const x = String(s || "");
+  if (x.length <= max) return x;
+  return x.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+}
+
+// Extrait "Nom (Parti)" à partir d'une chaîne auteur (souvent: "Prénom Nom (SP, ZH)" ou similaire)
+// - garde uniquement le nom de famille (dernier token) + parti si détectable
+function formatAuthorSurnameParty(authorRaw) {
+  const raw = normalizeSpace(authorRaw);
+  if (!raw) return "";
+
+  // si plusieurs auteurs: garde le premier
+  const first = raw.split(" / ")[0].split(";")[0].split(" | ")[0].trim();
+
+  // parti: contenu dans parenthèses -> on prend le 1er élément avant virgule
+  // ex: "(SP, ZH)" -> "SP"
+  // ex: "(PS)" -> "PS"
+  let party = "";
+  const paren = first.match(/\(([^)]+)\)/);
+  if (paren && paren[1]) {
+    const inside = normalizeSpace(paren[1]);
+    const firstPart = inside.split(",")[0].trim();
+    // garde une abréviation plausible (lettres + éventuellement tiret)
+    if (/^[A-ZÄÖÜ]{1,6}(-[A-ZÄÖÜ]{1,6})?$/.test(firstPart)) {
+      party = firstPart;
+    } else {
+      // parfois "SP/PS" etc.
+      const m = firstPart.match(/[A-ZÄÖÜ]{1,6}(?:-[A-ZÄÖÜ]{1,6})?/);
+      if (m) party = m[0];
+    }
+  }
+
+  // retire tout ce qui est entre parenthèses pour isoler le nom
+  const noParen = normalizeSpace(first.replace(/\([^)]*\)/g, "").trim());
+  // retire éventuels préfixes type "Auteur:" déjà présents
+  const cleaned = noParen.replace(/^(auteur|auteure|autrice|déposant|déposante|urheber|einreicher)\s*:?/i, "").trim();
+
+  // nom de famille = dernier token (en gardant traits d'union / apostrophes)
+  const tokens = cleaned.split(" ").filter(Boolean);
+  const surname = tokens.length ? tokens[tokens.length - 1] : cleaned;
+
+  if (!surname) return "";
+  return party ? `${surname} (${party})` : surname;
+}
+
 // Tente d’extraire l’auteur dans un snippet texte, à partir de mots-clés (FR/DE)
 function extractAuthorFromText(text, authorKeys) {
-  const t = " " + normalizeSpace(text).toLowerCase() + " ";
+  const original = normalizeSpace(text);
+  const lower = (" " + original.toLowerCase() + " ");
+
   for (const key of authorKeys) {
     const k = " " + key.toLowerCase() + " ";
-    const idx = t.indexOf(k);
+    const idx = lower.indexOf(k);
     if (idx !== -1) {
-      // prend ce qui suit le mot clé, sur ~80 chars, et coupe proprement
-      const tail = normalizeSpace(text).slice(Math.max(0, idx), idx + 220);
-      // heuristique: après "Auteur" / "Urheber", on cherche ":" puis le nom
-      const afterColon = tail.split(":").slice(1).join(":").trim();
-      const candidate = normalizeSpace(afterColon || tail.replace(new RegExp(key, "i"), "").trim());
+      // prend une fenêtre après le keyword
+      const start = Math.max(0, idx);
+      const tail = original.slice(start, start + 260);
+
+      // privilégie ce qui suit ":" si présent
+      const parts = tail.split(":");
+      const candidate = normalizeSpace((parts.length > 1 ? parts.slice(1).join(":") : tail)
+        .replace(new RegExp(key, "i"), "")
+        .trim());
+
       // coupe sur séparateurs fréquents
       const cut = candidate.split(" | ")[0].split(" - ")[0].split(" / ")[0].trim();
       if (cut && cut.length > 2) return cut;
@@ -93,11 +146,10 @@ function extractAuthorFromText(text, authorKeys) {
   return "";
 }
 
-// Tente d’extraire un titre (texte d’un lien proche) dans un snippet HTML
+// Tente d’extraire un titre dans un snippet HTML
 function extractTitleFromSnippet(snippetHtml, num) {
-  // 1) chercher un <a>...</a> après le numéro, qui ne soit pas juste le numéro
   const afterIdx = snippetHtml.indexOf(num);
-  const slice = afterIdx >= 0 ? snippetHtml.slice(afterIdx, afterIdx + 1200) : snippetHtml;
+  const slice = afterIdx >= 0 ? snippetHtml.slice(afterIdx, afterIdx + 1400) : snippetHtml;
 
   const aRe = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
@@ -105,18 +157,13 @@ function extractTitleFromSnippet(snippetHtml, num) {
     const txt = normalizeSpace(stripTags(m[1]));
     if (!txt) continue;
     if (txt === num) continue;
-    // évite les liens “Détails”, “PDF”, etc.
     if (txt.length < 6) continue;
     if (/^(details|détails|pdf|weiter|mehr)$/i.test(txt)) continue;
-    // souvent le titre est le premier gros texte cliquable
     return txt;
   }
 
-  // 2) fallback: prendre une ligne "propre" après le numéro
   const text = normalizeSpace(stripTags(slice));
-  // enlève le numéro au début si présent
   const cleaned = normalizeSpace(text.replace(num, "").trim());
-  // coupe sur gros séparateurs
   return cleaned.split(" | ")[0].split(" - ")[0].trim();
 }
 
@@ -132,7 +179,7 @@ class CuriaVistaFetcher {
 
     this.cacheItemsPath = this.fm.joinPath(this.dir, `cacheItems_${key}.json`); // [{num,title,author}]
     this.lastUpdatePath = this.fm.joinPath(this.dir, `lastUpdate_${key}.txt`);
-    this.seenNumsPath = this.fm.joinPath(this.dir, `seenNums_${key}.json`);   // [num]
+    this.seenNumsPath = this.fm.joinPath(this.dir, `seenNums_${key}.json`); // [num]
     this.lastNewNumsPath = this.fm.joinPath(this.dir, `lastNewNums_${key}.json`); // [num]
   }
 
@@ -187,7 +234,6 @@ class CuriaVistaFetcher {
     const items = [];
     if (!html) return items;
 
-    // numéros type 24.1234
     const numRe = /\b(\d{2}\.\d{4})\b/g;
     const matches = [...html.matchAll(numRe)];
     if (matches.length === 0) return items;
@@ -197,20 +243,17 @@ class CuriaVistaFetcher {
       const idx = m.index ?? -1;
       if (idx < 0) continue;
 
-      // fenêtre autour du numéro pour vérifier "Interpellation" et extraire titre/auteur
       const start = Math.max(0, idx - 900);
-      const end = Math.min(html.length, idx + 1800);
+      const end = Math.min(html.length, idx + 2000);
       const snippetHtml = html.slice(start, end);
-      const snippetText = normalizeSpace(stripTags(snippetHtml)).toLowerCase();
+      const snippetTextLower = normalizeSpace(stripTags(snippetHtml)).toLowerCase();
 
-      // filtre "interpellation"
-      if (!snippetText.includes("interpellation")) continue;
-
-      // évite doublons
+      if (!snippetTextLower.includes("interpellation")) continue;
       if (items.some((it) => it.num === num)) continue;
 
       const title = extractTitleFromSnippet(snippetHtml, num);
-      const author = extractAuthorFromText(stripTags(snippetHtml), this.cfg.authorKeys);
+      const authorRaw = extractAuthorFromText(stripTags(snippetHtml), this.cfg.authorKeys);
+      const author = formatAuthorSurnameParty(authorRaw);
 
       items.push({
         num,
@@ -283,12 +326,6 @@ function addLine(w, text, { bold = false, centered = false, size = 12, color = n
   return t;
 }
 
-function clamp(s, max) {
-  const x = String(s || "");
-  if (x.length <= max) return x;
-  return x.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
-}
-
 // ---------- Main ----------
 const lang = pickLangAuto();
 const cfg = CFG[lang];
@@ -309,7 +346,6 @@ if (didUpdate) {
   newNumsToShow = newNums;
 }
 
-// 3 dernières (num + title + author)
 const last3 = (allItems || []).slice(0, 3);
 
 const w = new ListWidget();
@@ -329,25 +365,20 @@ if (newNumsToShow && newNumsToShow.length > 0) {
 
 w.addSpacer(8);
 
-// 3 dernières: numéro + titre + auteur
+// 3 dernières: numéro + titre + auteur formaté "Nom (Parti)"
 if (last3.length === 0) {
   addLine(w, "—", { size: 12 });
 } else {
   for (const it of last3) {
     const num = it.num || "";
-    const title = it.title ? clamp(it.title, 55) : "";
-    const author = it.author ? clamp(it.author, 45) : "";
+    const title = it.title ? clamp(it.title, 60) : "";
+    const author = it.author ? clamp(it.author, 40) : "";
 
-    // ligne 1: numéro + titre (si possible sur une ligne)
     const header = title ? `${num} — ${title}` : num;
     addLine(w, header, { bold: true, size: 11, lineLimit: 1 });
 
-    // ligne 2: auteur
     if (author) {
       addLine(w, author, { size: 10, color: Color.gray(), lineLimit: 1 });
-    } else {
-      // si auteur introuvable, on n’affiche rien (plus propre)
-      // (tu peux remplacer par "—" si tu veux)
     }
 
     w.addSpacer(4);
