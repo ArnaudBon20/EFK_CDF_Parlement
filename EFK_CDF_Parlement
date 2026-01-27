@@ -253,79 +253,96 @@ function getAuthorSurname(affair) {
 async function getNewMatches() {
   console.log("[DEBUG] Recherche des nouvelles interpellations...");
   
-  const pageData = await getRecentPage();
-  if (!pageData || pageData.length === 0) {
-    console.error("[ERROR] Impossible de récupérer la page récente");
-    return [];
-  }
-  
   const lastSeenId = parseInt(readText(PATH_LAST_AFFAIR_ID, "0"));
-  console.log(`[DEBUG] Dernier ID vérifié: ${lastSeenId}`);
+  const isFirstRun = lastSeenId === 0;
+  console.log(`[DEBUG] Dernier ID vérifié: ${lastSeenId}${isFirstRun ? " (première exécution)" : ""}`);
   
   const matches = [];
   let newLastId = lastSeenId;
   let itemsChecked = 0;
+  const maxItemsToCheck = isFirstRun ? 100 : 50;
+  const pagesToCheck = isFirstRun ? 5 : 1;
   
-  // Parcourir les items de la page 1 (du plus récent au plus ancien)
-  for (let i = 0; i < pageData.length && itemsChecked < 50; i++) {
-    const item = pageData[i];
-    const id = item?.id;
-    if (!id) continue;
-    
-    itemsChecked++;
-    
-    // Si on atteint un ID déjà vu, on arrête
-    if (id <= lastSeenId) {
-      console.log(`[DEBUG] ID ${id} déjà vu, arrêt de la recherche`);
-      break;
-    }
-    
-    // Mettre à jour le dernier ID vu
-    if (id > newLastId) newLastId = id;
-    
-    let affair;
-    try {
-      affair = await fetchAffairById(id);
-    } catch (e) {
-      console.warn(`[WARN] Skip affair ${id}: ${e}`);
+  console.log(`[DEBUG] Vérification de ${pagesToCheck} page(s), max ${maxItemsToCheck} items`);
+  
+  // Parcourir les pages récentes
+  for (let pageNum = 1; pageNum <= pagesToCheck; pageNum++) {
+    const pageData = await tryFetchAffairsPage(pageNum);
+    if (!pageData || pageData.length === 0) {
+      console.warn(`[WARN] Page ${pageNum} vide ou inaccessible`);
       continue;
     }
     
-    const typeId = affair?.affairType?.id;
-    const shortIdDebug = getShortId(affair, String(id));
+    console.log(`[DEBUG] Page ${pageNum}: ${pageData.length} items`);
     
-    if (!INTERPELLATION_TYPE_IDS.has(typeId)) {
-      console.log(`[DEBUG] ${shortIdDebug} (ID ${id}): Type ${typeId} n'est pas une interpellation`);
-      continue;
-    }
-    
-    console.log(`[DEBUG] ${shortIdDebug} (ID ${id}): Est une interpellation, vérification mot-clé...`);
-    if (!affairContainsKeyword(affair, cfg.keyword)) {
-      console.log(`[DEBUG] ${shortIdDebug}: Mot-clé "${cfg.keyword}" non trouvé`);
-      continue;
-    }
-    
-    const shortId = shortIdDebug;
-    const title = normalize(stripHtml(affair?.title || ""));
-    const authorSurname = getAuthorSurname(affair);
-    
-    let party = null;
-    const councillorId = affair?.author?.councillor?.id;
-    if (councillorId) {
+    // Parcourir les items de la page
+    for (let i = 0; i < pageData.length && itemsChecked < maxItemsToCheck; i++) {
+      const item = pageData[i];
+      const id = item?.id;
+      if (!id) continue;
+      
+      itemsChecked++;
+      
+      // Si on atteint un ID déjà vu (et que ce n'est pas la première exécution), on arrête
+      if (!isFirstRun && id <= lastSeenId) {
+        console.log(`[DEBUG] ID ${id} déjà vu, arrêt de la recherche`);
+        return matches;
+      }
+      
+      // Mettre à jour le dernier ID vu
+      if (id > newLastId) newLastId = id;
+      
+      let affair;
       try {
-        party = await fetchCouncillorParty(councillorId);
+        affair = await fetchAffairById(id);
       } catch (e) {
-        console.warn(`[WARN] Impossible de récupérer le parti pour ${councillorId}`);
+        console.warn(`[WARN] Skip affair ${id}: ${e}`);
+        continue;
+      }
+      
+      const typeId = affair?.affairType?.id;
+      const shortIdDebug = getShortId(affair, String(id));
+      
+      if (!INTERPELLATION_TYPE_IDS.has(typeId)) {
+        console.log(`[DEBUG] ${shortIdDebug} (ID ${id}): Type ${typeId} n'est pas une interpellation`);
+        continue;
+      }
+      
+      console.log(`[DEBUG] ${shortIdDebug} (ID ${id}): Est une interpellation, vérification mot-clé...`);
+      if (!affairContainsKeyword(affair, cfg.keyword)) {
+        console.log(`[DEBUG] ${shortIdDebug}: Mot-clé "${cfg.keyword}" non trouvé`);
+        continue;
+      }
+      
+      const shortId = shortIdDebug;
+      const title = normalize(stripHtml(affair?.title || ""));
+      const authorSurname = getAuthorSurname(affair);
+      
+      let party = null;
+      const councillorId = affair?.author?.councillor?.id;
+      if (councillorId) {
+        try {
+          party = await fetchCouncillorParty(councillorId);
+        } catch (e) {
+          console.warn(`[WARN] Impossible de récupérer le parti pour ${councillorId}`);
+        }
+      }
+      
+      matches.push({
+        shortId,
+        title,
+        author: authorSurname,
+        party: party ? normalize(party) : null,
+      });
+      console.log(`[DEBUG] Nouvelle interpellation trouvée: ${shortId}`);
+      
+      if (matches.length >= 10 && !isFirstRun) {
+        console.log(`[DEBUG] 10 matches trouvés, arrêt`);
+        return matches;
       }
     }
     
-    matches.push({
-      shortId,
-      title,
-      author: authorSurname,
-      party: party ? normalize(party) : null,
-    });
-    console.log(`[DEBUG] Nouvelle interpellation trouvée: ${shortId}`);
+    if (matches.length >= 10 && !isFirstRun) break;
   }
   
   // Sauvegarder le dernier ID vérifié
@@ -334,7 +351,7 @@ async function getNewMatches() {
     console.log(`[DEBUG] Nouveau dernier ID sauvegardé: ${newLastId}`);
   }
   
-  console.log(`[DEBUG] Total nouvelles interpellations: ${matches.length}`);
+  console.log(`[DEBUG] Total ${isFirstRun ? "interpellations" : "nouvelles interpellations"}: ${matches.length}`);
   return matches;
 }
 
