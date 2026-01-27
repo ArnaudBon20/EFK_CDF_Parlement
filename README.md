@@ -1,97 +1,73 @@
+# 📊 CDF / EFK – Parliament Interpellations Widget (Scriptable)
+
 This Scriptable widget displays recent parliamentary interpellations that explicitly mention the Swiss Federal Audit Office:
 
-🇫🇷 Contrôle fédéral des finances (CDF)
+- 🇫🇷 Contrôle fédéral des finances (CDF)
+- 🇩🇪 Eidgenössische Finanzkontrolle (EFK)
 
-🇩🇪 Eidgenössische Finanzkontrolle (EFK)
+The widget automatically queries Curia Vista (parlament.ch) once per day and highlights new interpellations as well as the three most recent ones.
 
-The widget automatically checks Curia Vista (parlament.ch) once per day and highlights new interpellations as well as the three most recent ones.
+---
 
-✨ Features
+## Features
 
-🔍 Searches Curia Vista in:
+- Searches Curia Vista for references to:
+  - “Contrôle fédéral des finances” (French)
+  - “Eidgenössische Finanzkontrolle” (German)
+- Displays newly detected interpellations on a single line (numbers only)
+- Displays the three most recent interpellations
+- Automatic language detection (FR / DE)
+- Tap the widget to open the corresponding Curia Vista search
+- Local caching to detect new interpellations between updates
+- Automatic daily update (default time: 00:30)
 
-French: “Contrôle fédéral des finances”
+---
 
-German: “Eidgenössische Finanzkontrolle”
+## Requirements
 
-🆕 New interpellations listed on a single line (numbers only)
+- iOS or iPadOS
+- Scriptable app  
+  https://apps.apple.com/app/scriptable/id1405459188
 
-📄 Three latest interpellations displayed below
+---
 
-🌍 Automatic FR / DE language detection
+## Installation
 
-🔗 Tap the widget to open the corresponding Curia Vista search
+1. Install the Scriptable app from the App Store.
+2. Create a new script in Scriptable.
+3. Paste the full JavaScript code of this repository into the editor.
+4. Save the script (for example: `CDF_EFK_Parliament_Widget`).
+5. Add a Scriptable widget to your home screen.
+6. Select the saved script in the widget settings.
 
-💾 Local cache to detect what is new since the last update
+---
 
-⏰ Automatic daily update (default: 00:30)
+## Language Selection
 
-🧩 What the Widget Displays
-Le CDF au Parlement
-Nouvelles: 25.3012 / 25.2987
-25.3012
-25.2987
-25.2874
+The widget automatically detects the device language.
 
+You can force the language by setting a widget parameter:
 
-or (German):
+- `fr` → French
+- `de` → German
 
-Die EFK im Parlament
-Neu: 25.3012
-25.3012
-25.2987
-25.2874
+---
 
+## Update Logic
 
-Only interpellation numbers are shown – no dates, no titles.
+- The widget checks Curia Vista once per day at 00:30.
+- Previously detected interpellation numbers are stored locally.
+- Newly detected interpellations are highlighted in the widget.
 
-⚙️ Requirements
+You can change the update time directly in the script:
 
-📱 iOS / iPadOS
-
-📦 Scriptable
-
-🚀 Installation
-
-Install Scriptable from the App Store
-
-Create a new script
-
-Paste the full JavaScript code into the editor
-
-Save the script (e.g. CDF_EFK_Parliament_Widget)
-
-Add a Scriptable widget to your home screen
-
-Select the script
-
-🌐 Language Selection
-
-The widget detects the language automatically based on your device locale.
-
-You can force the language via the widget parameter:
-
-fr → French
-
-de → German
-
-Example:
-Long-press the widget → Edit Widget → Widget Parameter → de
-
-🔄 Update Logic
-
-The widget refreshes once per day at 00:30
-
-Previously seen interpellation numbers are stored locally
-
-Any newly detected numbers appear under “New / Nouvelles / Neu”
-
-You can adjust the update time in the script:
-
+```js
 const UPDATE_HOUR = 0;
 const UPDATE_MINUTE = 30;
 
-🔗 Data Sources
+---
+
+## Data Sources
 
 Curia Vista (French):
 https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista
@@ -99,12 +75,9 @@ https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista
 Curia Vista (German):
 https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista
 
-⚠️ Disclaimer
+--
 
-This widget uses publicly available HTML pages from parlament.ch.
-Parsing relies on page structure and keywords (“Interpellation / Interpellationen”), which may change over time.
+## Disclaimer
 
-📄 License
-
-MIT License
-Free to use, adapt, and improve.
+This widget relies on publicly available HTML pages from parlament.ch.
+Changes to page structure or wording may require updates to the parsing logic.
