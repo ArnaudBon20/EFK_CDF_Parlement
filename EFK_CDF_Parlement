@@ -410,26 +410,33 @@ let errorMsg = "";
 let usedCache = false;
 let items = [];
 
-// Vérifier si le cache est valide
-if (isCacheValid()) {
-  console.log("[DEBUG] Cache valide, utilisation du cache");
-  items = readJSON(PATH_CACHE_ITEMS, []);
+// Vérifier si le cache est valide ET non vide
+const cachedItems = readJSON(PATH_CACHE_ITEMS, []);
+const cacheHasData = Array.isArray(cachedItems) && cachedItems.length > 0;
+
+if (isCacheValid() && cacheHasData) {
+  console.log(`[DEBUG] Cache valide avec ${cachedItems.length} items, utilisation du cache`);
+  items = cachedItems;
   usedCache = true;
   fetchOk = true;
 } else {
-  console.log("[DEBUG] Cache expiré ou absent, fetch API...");
+  console.log(`[DEBUG] Cache ${cacheHasData ? "expiré" : "vide"}, fetch API...`);
+  
+  // Si le cache est vide, réinitialiser le lastSeenId pour forcer une recherche complète
+  if (!cacheHasData) {
+    console.log("[DEBUG] Réinitialisation du lastSeenId pour recherche complète");
+    writeText(PATH_LAST_AFFAIR_ID, "0");
+  }
+  
   try {
     fetched = await getNewMatches();
     fetchOk = Array.isArray(fetched);
-    console.log(`[DEBUG] Fetch OK: ${fetchOk}, Nouvelles interpellations: ${fetched.length}`);
+    console.log(`[DEBUG] Fetch OK: ${fetchOk}, Interpellations trouvées: ${fetched.length}`);
   } catch (e) {
     fetchOk = false;
     errorMsg = String(e);
     console.error(`[ERROR] Fetch échoué: ${errorMsg}`);
   }
-
-  // Charger le cache existant
-  const cachedItems = readJSON(PATH_CACHE_ITEMS, []);
   
   // Fusionner les nouvelles avec le cache (nouvelles en premier)
   if (fetchOk && fetched.length > 0) {
