@@ -2,50 +2,72 @@
 // These must be at the very top of the file. Do not edit.
 // icon-color: red; icon-glyph: file-alt;
 
-/**
- * Widget Curia Vista - Interpellations mentionnant CDF/EFK
- * Langue: automatique selon la langue iOS (Device.language())
- *
- * IMPORTANT:
- * - La recherche se fait UNIQUEMENT via les 2 URLs fournies par l'utilisateur (FR/DE)
- *
- * Affichage:
- *  - Titre centré en haut
- *  - Ligne "nouveautés": numéros (sur 1 ligne) ou ❌
- *  - 3 dernières interpellations: numéro + titre + "Nom (Parti)" si possible
- * Tap -> ouvre la recherche Curia Vista (URL exacte FR/DE)
- */
-
 const UPDATE_HOUR = 0;
 const UPDATE_MINUTE = 30;
 
 const CFG = {
   fr: {
     title: "Le CDF au Parlement",
-    // URL EXACTE fournie
+    // URL EXACTE (clic)
     url: 'https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista#k=%22Contr%C3%B4le%20f%C3%A9d%C3%A9ral%20des%20finances%22',
     acceptLang: "fr-CH,fr;q=0.9",
     authorKeys: ["auteur", "auteure", "autrice", "auteur/trice", "auteur·e", "déposant", "déposante"],
   },
   de: {
     title: "Die EFK im Parlament",
-    // URL EXACTE fournie
+    // URL EXACTE (clic)
     url: 'https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista#k=%22Eidgen%C3%B6ssische%20Finanzkontrolle%22#l=1033',
     acceptLang: "de-CH,de;q=0.9",
     authorKeys: ["urheber", "urheber/in", "einreicher", "einreicherin"],
   },
 };
 
-// ---------- Utils ----------
+// ---------- Lang (auto iOS) ----------
 function pickLangAuto() {
+  // 1) langue préférée iOS (le plus fiable)
+  try {
+    const pref = Device.preferredLanguages ? Device.preferredLanguages() : null;
+    const first = Array.isArray(pref) && pref.length ? String(pref[0]).toLowerCase() : "";
+    if (first.startsWith("fr")) return "fr";
+    if (first.startsWith("de")) return "de";
+  } catch {}
+
+  // 2) fallback
   const ui = (Device.language() || "").toLowerCase();
+  if (ui.startsWith("fr")) return "fr";
   if (ui.startsWith("de")) return "de";
   return "fr";
 }
 
-function nowISO() {
-  return new Date().toISOString();
+// ---------- URL helpers ----------
+// Convertit https://.../suche-curia-vista#k=...#l=...
+// en        https://.../suche-curia-vista?k=...&l=...
+// => fetch server-side (utile dans Scriptable), tout en gardant l’URL originale pour le clic.
+function buildFetchUrlFromHash(originalUrl) {
+  const u = new URL(originalUrl);
+
+  // récupère TOUS les params présents dans les fragments (#...)
+  const hash = originalUrl.split("#").slice(1); // ["k=...", "l=1033"]
+  const params = new URLSearchParams();
+
+  for (const part of hash) {
+    if (!part) continue;
+    // part peut être "k=..." ou "l=..." ou "k=...&x=..."
+    const sp = new URLSearchParams(part);
+    for (const [k, v] of sp.entries()) params.set(k, v);
+  }
+
+  // si pas de hash-param, fallback vers l’URL telle quelle (rare)
+  const qs = params.toString();
+  if (!qs) return originalUrl;
+
+  u.hash = "";          // remove hash
+  u.search = "?" + qs;  // set query string
+  return u.toString();
 }
+
+// ---------- Text utils ----------
+function nowISO() { return new Date().toISOString(); }
 
 function decodeHtmlEntities(str) {
   if (!str) return "";
@@ -80,7 +102,6 @@ function clamp(s, max) {
   return x.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
 }
 
-// "Nom (Parti)" à partir d'une chaîne auteur (souvent: "Prénom Nom (SP, ZH)")
 function formatAuthorSurnameParty(authorRaw) {
   const raw = normalizeSpace(authorRaw);
   if (!raw) return "";
@@ -92,12 +113,8 @@ function formatAuthorSurnameParty(authorRaw) {
   if (paren && paren[1]) {
     const inside = normalizeSpace(paren[1]);
     const firstPart = inside.split(",")[0].trim();
-    if (/^[A-ZÄÖÜ]{1,6}(-[A-ZÄÖÜ]{1,6})?$/.test(firstPart)) {
-      party = firstPart;
-    } else {
-      const m = firstPart.match(/[A-ZÄÖÜ]{1,6}(?:-[A-ZÄÖÜ]{1,6})?/);
-      if (m) party = m[0];
-    }
+    const m = firstPart.match(/[A-ZÄÖÜ]{1,8}(?:-[A-ZÄÖÜ]{1,8})?/);
+    if (m) party = m[0];
   }
 
   const noParen = normalizeSpace(first.replace(/\([^)]*\)/g, "").trim());
@@ -167,8 +184,8 @@ class CuriaVistaFetcher {
 
     this.cacheItemsPath = this.fm.joinPath(this.dir, `cacheItems_${key}.json`); // [{num,title,author}]
     this.lastUpdatePath = this.fm.joinPath(this.dir, `lastUpdate_${key}.txt`);
-    this.seenNumsPath = this.fm.joinPath(this.dir, `seenNums_${key}.json`); // [num]
-    this.lastNewNumsPath = this.fm.joinPath(this.dir, `lastNewNums_${key}.json`); // [num]
+    this.seenNumsPath = this.fm.joinPath(this.dir, `seenNums_${key}.json`);
+    this.lastNewNumsPath = this.fm.joinPath(this.dir, `lastNewNums_${key}.json`);
   }
 
   loadJSON(path, fallback) {
@@ -192,13 +209,14 @@ class CuriaVistaFetcher {
 
     if (!this.fm.fileExists(this.cacheItemsPath)) return true;
     if (now >= todayUpdate && lastUpdate < todayUpdate) return true;
-
     return false;
   }
 
   async fetchHTML() {
-    // IMPORTANT: utilise EXACTEMENT cfg.url (tes URLs)
-    const req = new Request(this.cfg.url);
+    // ✅ fetch via query string (hash -> query), mais clic reste URL originale
+    const fetchUrl = buildFetchUrlFromHash(this.cfg.url);
+
+    const req = new Request(fetchUrl);
     req.headers = {
       "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
       "Accept-Language": this.cfg.acceptLang,
@@ -231,11 +249,7 @@ class CuriaVistaFetcher {
       const authorRaw = extractAuthorFromText(stripTags(snippetHtml), this.cfg.authorKeys);
       const author = formatAuthorSurnameParty(authorRaw);
 
-      items.push({
-        num,
-        title: normalizeSpace(title),
-        author: normalizeSpace(author),
-      });
+      items.push({ num, title: normalizeSpace(title), author: normalizeSpace(author) });
     }
 
     return items;
@@ -244,13 +258,11 @@ class CuriaVistaFetcher {
   loadItemsCache() { return this.loadJSON(this.cacheItemsPath, []); }
   loadSeenNums() { return this.loadJSON(this.seenNumsPath, []); }
   saveSeenNums(arr) { this.saveJSON(this.seenNumsPath, arr); }
-
   loadLastNewNums() { return this.loadJSON(this.lastNewNumsPath, []); }
   saveLastNewNums(arr) { this.saveJSON(this.lastNewNumsPath, arr); }
 
   async getItemsAndMaybeUpdate() {
     const cached = this.loadItemsCache();
-
     if (!this.shouldUpdate()) return { items: cached, didUpdate: false };
 
     try {
@@ -308,7 +320,7 @@ if (didUpdate) {
 const last3 = (allItems || []).slice(0, 3);
 
 const w = new ListWidget();
-// IMPORTANT: clic = URL exacte FR/DE
+// ✅ clic = URL EXACTE fournie (avec hash)
 w.url = cfg.url;
 
 w.setPadding(6, 12, 12, 12);
@@ -316,6 +328,7 @@ w.setPadding(6, 12, 12, 12);
 addCenteredTitle(w, cfg.title);
 w.addSpacer(6);
 
+// nouveautés: numéros sur une ligne sinon ❌
 if (newNumsToShow && newNumsToShow.length > 0) {
   addLine(w, newNumsToShow.join(" / "), { bold: true, centered: true, size: 12, lineLimit: 1 });
 } else {
@@ -324,6 +337,7 @@ if (newNumsToShow && newNumsToShow.length > 0) {
 
 w.addSpacer(8);
 
+// 3 dernières: numéro + titre + Nom (Parti)
 if (last3.length === 0) {
   addLine(w, "—", { size: 12 });
 } else {
