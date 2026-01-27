@@ -59,12 +59,6 @@ You can force the language by setting a widget parameter:
 - Previously detected interpellation numbers are stored locally.
 - Newly detected interpellations are highlighted in the widget.
 
-You can change the update time directly in the script:
-
-```js
-const UPDATE_HOUR = 0;
-const UPDATE_MINUTE = 30;
-
 ---
 
 ## Data Sources
