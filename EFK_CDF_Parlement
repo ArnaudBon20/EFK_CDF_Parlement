@@ -4,31 +4,44 @@
 
 /**
  * Widget Curia Vista - Interpellations mentionnant CDF/EFK
+ * Langue: automatique selon la langue iOS (Device.language())
+ *
  * Affichage:
- *  - ligne 1: titre
- *  - ligne 2: numéros des nouvelles interpellations (depuis la dernière mise à jour quotidienne), sinon ❌
- *  - puis: les 3 dernières (numéros uniquement)
- * Click -> ouvre la recherche Curia Vista
+ *  - Titre centré en haut
+ *  - Ligne "nouveautés": numéros (sur 1 ligne) ou ❌
+ *  - 3 dernières interpellations: numéro + titre + auteur
+ * Tap -> ouvre la recherche Curia Vista
  */
 
 const UPDATE_HOUR = 0;
 const UPDATE_MINUTE = 30;
 
-// --- Config FR/DE ---
 const CFG = {
   fr: {
     title: "Le CDF au Parlement",
     url: 'https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista#k=%22Contr%C3%B4le%20f%C3%A9d%C3%A9ral%20des%20finances%22',
     acceptLang: "fr-CH,fr;q=0.9",
+    authorKeys: ["auteur", "auteure", "autrice", "auteur/trice", "auteur·e", "déposant", "déposante"],
   },
   de: {
     title: "Die EFK im Parlament",
     url: 'https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista#k=%22Eidgen%C3%B6ssische%20Finanzkontrolle%22#l=1033',
     acceptLang: "de-CH,de;q=0.9",
+    authorKeys: ["urheber", "urheber/in", "einreicher", "einreicherin"],
   },
 };
 
-// --- Utils ---
+// ---------- Utils ----------
+function pickLangAuto() {
+  const ui = (Device.language() || "").toLowerCase();
+  if (ui.startsWith("de")) return "de";
+  return "fr";
+}
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
 function decodeHtmlEntities(str) {
   if (!str) return "";
   return String(str)
@@ -39,53 +52,115 @@ function decodeHtmlEntities(str) {
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&#(\d+);/g, (_, code) => {
-      try { return String.fromCharCode(parseInt(code, 10)); } catch { return _; }
+      try {
+        return String.fromCharCode(parseInt(code, 10));
+      } catch {
+        return _;
+      }
     })
     .replace(/[’‘‛]/g, "'")
     .trim();
 }
 
-function pickLang() {
-  // 1) widgetParameter a priorité
-  const p = (args.widgetParameter || "").trim().toLowerCase();
-  if (p === "fr" || p === "de") return p;
-
-  // 2) langue d’interface (corrige le cas iPhone de_CH -> allemand)
-  // Device.language() renvoie typiquement "fr", "de", "it", ...
-  const ui = (Device.language() || "").toLowerCase();
-  if (ui.startsWith("de")) return "de";
-  return "fr";
+function stripTags(html) {
+  return decodeHtmlEntities(String(html || "").replace(/<[^>]*>/g, " "));
 }
 
-function nowISO() { return new Date().toISOString(); }
+function normalizeSpace(s) {
+  return String(s || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+\|\s+/g, " | ")
+    .trim();
+}
 
-// --- Fetcher / Cache ---
+// Tente d’extraire l’auteur dans un snippet texte, à partir de mots-clés (FR/DE)
+function extractAuthorFromText(text, authorKeys) {
+  const t = " " + normalizeSpace(text).toLowerCase() + " ";
+  for (const key of authorKeys) {
+    const k = " " + key.toLowerCase() + " ";
+    const idx = t.indexOf(k);
+    if (idx !== -1) {
+      // prend ce qui suit le mot clé, sur ~80 chars, et coupe proprement
+      const tail = normalizeSpace(text).slice(Math.max(0, idx), idx + 220);
+      // heuristique: après "Auteur" / "Urheber", on cherche ":" puis le nom
+      const afterColon = tail.split(":").slice(1).join(":").trim();
+      const candidate = normalizeSpace(afterColon || tail.replace(new RegExp(key, "i"), "").trim());
+      // coupe sur séparateurs fréquents
+      const cut = candidate.split(" | ")[0].split(" - ")[0].split(" / ")[0].trim();
+      if (cut && cut.length > 2) return cut;
+    }
+  }
+  return "";
+}
+
+// Tente d’extraire un titre (texte d’un lien proche) dans un snippet HTML
+function extractTitleFromSnippet(snippetHtml, num) {
+  // 1) chercher un <a>...</a> après le numéro, qui ne soit pas juste le numéro
+  const afterIdx = snippetHtml.indexOf(num);
+  const slice = afterIdx >= 0 ? snippetHtml.slice(afterIdx, afterIdx + 1200) : snippetHtml;
+
+  const aRe = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = aRe.exec(slice)) !== null) {
+    const txt = normalizeSpace(stripTags(m[1]));
+    if (!txt) continue;
+    if (txt === num) continue;
+    // évite les liens “Détails”, “PDF”, etc.
+    if (txt.length < 6) continue;
+    if (/^(details|détails|pdf|weiter|mehr)$/i.test(txt)) continue;
+    // souvent le titre est le premier gros texte cliquable
+    return txt;
+  }
+
+  // 2) fallback: prendre une ligne "propre" après le numéro
+  const text = normalizeSpace(stripTags(slice));
+  // enlève le numéro au début si présent
+  const cleaned = normalizeSpace(text.replace(num, "").trim());
+  // coupe sur gros séparateurs
+  return cleaned.split(" | ")[0].split(" - ")[0].trim();
+}
+
+// ---------- Fetcher / Cache ----------
 class CuriaVistaFetcher {
   constructor(cfg, key) {
     this.cfg = cfg;
     this.key = key;
+
     this.fm = FileManager.local();
     this.dir = this.fm.joinPath(this.fm.documentsDirectory(), "cdf-efk-curiavista");
     if (!this.fm.fileExists(this.dir)) this.fm.createDirectory(this.dir, true);
 
-    this.cacheNumsPath = this.fm.joinPath(this.dir, `cacheNums_${key}.json`);
+    this.cacheItemsPath = this.fm.joinPath(this.dir, `cacheItems_${key}.json`); // [{num,title,author}]
     this.lastUpdatePath = this.fm.joinPath(this.dir, `lastUpdate_${key}.txt`);
-    this.seenPath = this.fm.joinPath(this.dir, `seen_${key}.json`);
-    this.lastNewPath = this.fm.joinPath(this.dir, `lastNew_${key}.json`);
+    this.seenNumsPath = this.fm.joinPath(this.dir, `seenNums_${key}.json`);   // [num]
+    this.lastNewNumsPath = this.fm.joinPath(this.dir, `lastNewNums_${key}.json`); // [num]
   }
 
   loadJSON(path, fallback) {
     if (!this.fm.fileExists(path)) return fallback;
-    try { return JSON.parse(this.fm.readString(path)); } catch { return fallback; }
+    try {
+      return JSON.parse(this.fm.readString(path));
+    } catch {
+      return fallback;
+    }
   }
 
   saveJSON(path, obj) {
-    try { this.fm.writeString(path, JSON.stringify(obj)); return true; } catch { return false; }
+    try {
+      this.fm.writeString(path, JSON.stringify(obj));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   getLastUpdateDate() {
     if (!this.fm.fileExists(this.lastUpdatePath)) return new Date(0);
-    try { return new Date(this.fm.readString(this.lastUpdatePath)); } catch { return new Date(0); }
+    try {
+      return new Date(this.fm.readString(this.lastUpdatePath));
+    } catch {
+      return new Date(0);
+    }
   }
 
   shouldUpdate() {
@@ -93,7 +168,7 @@ class CuriaVistaFetcher {
     const lastUpdate = this.getLastUpdateDate();
     const todayUpdate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), UPDATE_HOUR, UPDATE_MINUTE);
 
-    if (!this.fm.fileExists(this.cacheNumsPath)) return true;
+    if (!this.fm.fileExists(this.cacheItemsPath)) return true;
     if (now >= todayUpdate && lastUpdate < todayUpdate) return true;
 
     return false;
@@ -108,125 +183,175 @@ class CuriaVistaFetcher {
     return await req.loadString();
   }
 
-  parseInterpellationNumbers(html) {
-    const out = [];
-    if (!html) return out;
+  parseInterpellations(html) {
+    const items = [];
+    if (!html) return items;
 
     // numéros type 24.1234
     const numRe = /\b(\d{2}\.\d{4})\b/g;
     const matches = [...html.matchAll(numRe)];
-    if (matches.length === 0) return out;
+    if (matches.length === 0) return items;
 
     for (const m of matches) {
       const num = m[1];
       const idx = m.index ?? -1;
       if (idx < 0) continue;
 
-      // petite fenêtre autour pour vérifier le type "Interpellation"
-      const start = Math.max(0, idx - 600);
-      const end = Math.min(html.length, idx + 600);
-      const snippet = decodeHtmlEntities(html.slice(start, end)).toLowerCase();
+      // fenêtre autour du numéro pour vérifier "Interpellation" et extraire titre/auteur
+      const start = Math.max(0, idx - 900);
+      const end = Math.min(html.length, idx + 1800);
+      const snippetHtml = html.slice(start, end);
+      const snippetText = normalizeSpace(stripTags(snippetHtml)).toLowerCase();
 
-      if (snippet.includes("interpellation")) {
-        if (!out.includes(num)) out.push(num);
-      }
+      // filtre "interpellation"
+      if (!snippetText.includes("interpellation")) continue;
+
+      // évite doublons
+      if (items.some((it) => it.num === num)) continue;
+
+      const title = extractTitleFromSnippet(snippetHtml, num);
+      const author = extractAuthorFromText(stripTags(snippetHtml), this.cfg.authorKeys);
+
+      items.push({
+        num,
+        title: normalizeSpace(title),
+        author: normalizeSpace(author),
+      });
     }
-    return out;
+
+    return items;
   }
 
-  loadNumsCache() { return this.loadJSON(this.cacheNumsPath, []); }
-  loadSeen() { return this.loadJSON(this.seenPath, []); }
-  saveSeen(arr) { this.saveJSON(this.seenPath, arr); }
+  loadItemsCache() {
+    return this.loadJSON(this.cacheItemsPath, []);
+  }
 
-  loadLastNew() { return this.loadJSON(this.lastNewPath, []); }
-  saveLastNew(arr) { this.saveJSON(this.lastNewPath, arr); }
+  loadSeenNums() {
+    return this.loadJSON(this.seenNumsPath, []);
+  }
 
-  async getNumsAndMaybeUpdate() {
-    const cached = this.loadNumsCache();
+  saveSeenNums(arr) {
+    this.saveJSON(this.seenNumsPath, arr);
+  }
+
+  loadLastNewNums() {
+    return this.loadJSON(this.lastNewNumsPath, []);
+  }
+
+  saveLastNewNums(arr) {
+    this.saveJSON(this.lastNewNumsPath, arr);
+  }
+
+  async getItemsAndMaybeUpdate() {
+    const cached = this.loadItemsCache();
 
     if (!this.shouldUpdate()) {
-      return { nums: cached, didUpdate: false };
+      return { items: cached, didUpdate: false };
     }
 
     try {
       const html = await this.fetchHTML();
-      const nums = this.parseInterpellationNumbers(html);
+      const items = this.parseInterpellations(html);
 
-      if (nums.length > 0) {
-        this.saveJSON(this.cacheNumsPath, nums);
+      if (items.length > 0) {
+        this.saveJSON(this.cacheItemsPath, items);
         this.fm.writeString(this.lastUpdatePath, nowISO());
-        return { nums, didUpdate: true };
+        return { items, didUpdate: true };
       }
 
-      // fallback
-      return { nums: cached, didUpdate: false };
+      return { items: cached, didUpdate: false };
     } catch (e) {
       console.error("fetch error:", e);
-      return { nums: cached, didUpdate: false };
+      return { items: cached, didUpdate: false };
     }
   }
 }
 
-// --- UI helpers ---
-function addTitle(w, cfg) {
-  const t = w.addText(cfg.title);
-  t.font = Font.boldSystemFont(14);
-}
-
-function addLine(w, text, bold = false) {
+// ---------- UI ----------
+function addCenteredTitle(w, text) {
   const t = w.addText(text);
-  t.font = bold ? Font.boldSystemFont(12) : Font.systemFont(12);
-  t.lineLimit = 1;
+  t.font = Font.boldSystemFont(14);
+  t.centerAlignText();
 }
 
-// --- Main ---
-const lang = pickLang();
+function addLine(w, text, { bold = false, centered = false, size = 12, color = null, lineLimit = 1 } = {}) {
+  const t = w.addText(text);
+  t.font = bold ? Font.boldSystemFont(size) : Font.systemFont(size);
+  t.lineLimit = lineLimit;
+  if (centered) t.centerAlignText();
+  if (color) t.textColor = color;
+  return t;
+}
+
+function clamp(s, max) {
+  const x = String(s || "");
+  if (x.length <= max) return x;
+  return x.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+}
+
+// ---------- Main ----------
+const lang = pickLangAuto();
 const cfg = CFG[lang];
 
 const fetcher = new CuriaVistaFetcher(cfg, lang);
-const { nums: allNums, didUpdate } = await fetcher.getNumsAndMaybeUpdate();
+const { items: allItems, didUpdate } = await fetcher.getItemsAndMaybeUpdate();
 
-// Calcul des nouveautés uniquement quand on a vraiment mis à jour (comparé à “hier”)
-let newNumsToShow = fetcher.loadLastNew();
+const numsNow = (allItems || []).map((x) => x.num);
+let newNumsToShow = fetcher.loadLastNewNums();
 
 if (didUpdate) {
-  const seen = fetcher.loadSeen();
-  const newNums = allNums.filter((n) => !seen.includes(n));
+  const seenNums = fetcher.loadSeenNums();
+  const newNums = numsNow.filter((n) => !seenNums.includes(n));
 
-  // stocke pour affichage jusqu’à la prochaine mise à jour
-  fetcher.saveLastNew(newNums);
-
-  // met à jour le "seen" uniquement lors de la vraie mise à jour
-  fetcher.saveSeen(allNums);
+  fetcher.saveLastNewNums(newNums);
+  fetcher.saveSeenNums(numsNow);
 
   newNumsToShow = newNums;
 }
 
-// 3 dernières
-const last3 = (allNums || []).slice(0, 3);
+// 3 dernières (num + title + author)
+const last3 = (allItems || []).slice(0, 3);
 
-// Widget
 const w = new ListWidget();
 w.url = cfg.url;
-w.setPadding(12, 12, 12, 12);
+w.setPadding(6, 12, 12, 12);
 
-addTitle(w, cfg);
+// Titre centré tout en haut
+addCenteredTitle(w, cfg.title);
 w.addSpacer(6);
 
 // Ligne nouveautés: numéros sur une ligne sinon ❌
 if (newNumsToShow && newNumsToShow.length > 0) {
-  addLine(w, newNumsToShow.join(" / "), true);
+  addLine(w, newNumsToShow.join(" / "), { bold: true, centered: true, size: 12, lineLimit: 1 });
 } else {
-  addLine(w, "❌", true);
+  addLine(w, "❌", { bold: true, centered: true, size: 12 });
 }
 
-w.addSpacer(6);
+w.addSpacer(8);
 
-// 3 dernières
+// 3 dernières: numéro + titre + auteur
 if (last3.length === 0) {
-  addLine(w, "—");
+  addLine(w, "—", { size: 12 });
 } else {
-  for (const n of last3) addLine(w, n);
+  for (const it of last3) {
+    const num = it.num || "";
+    const title = it.title ? clamp(it.title, 55) : "";
+    const author = it.author ? clamp(it.author, 45) : "";
+
+    // ligne 1: numéro + titre (si possible sur une ligne)
+    const header = title ? `${num} — ${title}` : num;
+    addLine(w, header, { bold: true, size: 11, lineLimit: 1 });
+
+    // ligne 2: auteur
+    if (author) {
+      addLine(w, author, { size: 10, color: Color.gray(), lineLimit: 1 });
+    } else {
+      // si auteur introuvable, on n’affiche rien (plus propre)
+      // (tu peux remplacer par "—" si tu veux)
+    }
+
+    w.addSpacer(4);
+  }
 }
 
 Script.setWidget(w);
