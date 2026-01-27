@@ -292,11 +292,20 @@ async function getNewMatches() {
     }
     
     const typeId = affair?.affairType?.id;
-    if (!INTERPELLATION_TYPE_IDS.has(typeId)) continue;
+    const shortIdDebug = getShortId(affair, String(id));
     
-    if (!affairContainsKeyword(affair, cfg.keyword)) continue;
+    if (!INTERPELLATION_TYPE_IDS.has(typeId)) {
+      console.log(`[DEBUG] ${shortIdDebug} (ID ${id}): Type ${typeId} n'est pas une interpellation`);
+      continue;
+    }
     
-    const shortId = getShortId(affair, String(id));
+    console.log(`[DEBUG] ${shortIdDebug} (ID ${id}): Est une interpellation, vérification mot-clé...`);
+    if (!affairContainsKeyword(affair, cfg.keyword)) {
+      console.log(`[DEBUG] ${shortIdDebug}: Mot-clé "${cfg.keyword}" non trouvé`);
+      continue;
+    }
+    
+    const shortId = shortIdDebug;
     const title = normalize(stripHtml(affair?.title || ""));
     const authorSurname = getAuthorSurname(affair);
     
