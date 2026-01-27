@@ -3,82 +3,168 @@
 // icon-color: red; icon-glyph: gavel;
 
 /**
- * Widget Scriptable — "Le CDF au Parlement" / "Die EFK im Parlament"
- * - Langue auto selon iOS
- * - Source: Webservices Parlement (ws-old.parlament.ch)
- * - Affiche:
- *   1) Sur une ligne: numéros des nouvelles interpellations depuis hier (sinon ❌)
- *   2) Les 3 dernières interpellations (numéro + titre + auteur + parti si dispo)
- * - En cliquant: ouvre la recherche Curia Vista (FR/DE)
+ * Le CDF au Parlement / Die EFK im Parlament
+ * Source de données: Open Data Parlement (ws-old.parlament.ch) via JSON (pas de scraping Curia Vista).
+ *
+ * Affichage:
+ * - Titre centré en haut
+ * - Ligne "Nouveaux/Neu": numéros des nouvelles interpellations depuis la dernière mise à jour quotidienne, sinon ❌
+ * - 3 dernières interpellations: numéro + titre + Nom (Parti) si possible
+ *
+ * Tap sur le widget -> ouvre tes URLs Curia Vista (FR/DE) EXACTES.
  */
 
 const UPDATE_HOUR = 0;
 const UPDATE_MINUTE = 30;
 
-const BASE = "https://ws-old.parlament.ch";
-const TYPE_IDS = new Set([8, 9]); // 8=Interpellation, 9=Interpellation urgente
+// --- URLs Curia Vista (clic) : EXACTES ---
+const CV_FR =
+  'https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista#k=%22Contr%C3%B4le%20f%C3%A9d%C3%A9ral%20des%20finances%22';
+const CV_DE =
+  'https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista#k=%22Eidgen%C3%B6ssische%20Finanzkontrolle%22#l=1033';
 
-const SEARCH_URL_FR =
-  "https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista#k=%22Contr%C3%B4le%20f%C3%A9d%C3%A9ral%20des%20finances%22";
-const SEARCH_URL_DE =
-  "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista#k=%22Eidgen%C3%B6ssische%20Finanzkontrolle%22#l=1033";
+// --- Open Data / API ---
+const API_BASE = "https://ws-old.parlament.ch";
 
-// Couleurs
-const RED = new Color("#E30613");
-const TEXT_PRIMARY = new Color("#111111");
-const TEXT_SECONDARY = new Color("#666666");
-const BG = new Color("#FFFFFF");
+// 8 = Interpellation, 9 = Interpellation urgente (selon l’API)
+const INTERPELLATION_TYPE_IDS = new Set([8, 9]);
 
-// ------------------ Langue auto iOS ------------------
-function detectLang() {
-  const forced = (args.widgetParameter ? String(args.widgetParameter) : "").trim().toLowerCase();
-  if (forced === "fr" || forced === "de") return forced;
+const CFG = {
+  fr: {
+    title: "Le CDF au Parlement",
+    keyword: "Contrôle fédéral des finances",
+    openUrl: CV_FR,
+    apiLang: "fr",
+    acceptLang: "fr-CH,fr;q=0.9",
+    labelNew: "Nouveaux",
+  },
+  de: {
+    title: "Die EFK im Parlament",
+    keyword: "Eidgenössische Finanzkontrolle",
+    openUrl: CV_DE,
+    apiLang: "de",
+    acceptLang: "de-CH,de;q=0.9",
+    labelNew: "Neu",
+  },
+};
 
-  let preferred = [];
+// ----------------- Langue auto iOS -----------------
+function detectLangAuto() {
+  // Pas de widgetParameter (auto uniquement)
   try {
-    preferred = (Device.preferredLanguages ? Device.preferredLanguages() : []) || [];
-  } catch (e) {}
+    const pref = Device.preferredLanguages ? Device.preferredLanguages() : [];
+    const first = (Array.isArray(pref) && pref.length ? String(pref[0]) : "").toLowerCase();
+    if (first.startsWith("de")) return "de";
+    if (first.startsWith("fr")) return "fr";
+  } catch (_) {}
 
-  const joined = preferred.map(String).join(" ").toLowerCase();
-  if (joined.includes("fr")) return "fr";
-  if (joined.includes("de")) return "de";
-
-  // fallback
+  const ui = (Device.language() || "").toLowerCase();
+  if (ui.startsWith("de")) return "de";
   return "fr";
 }
 
-const LANG = detectLang();
-const TITLE = LANG === "fr" ? "Le CDF au Parlement" : "Die EFK im Parlament";
-const KEYWORD = LANG === "fr" ? "Contrôle fédéral des finances" : "Eidgenössische Finanzkontrolle";
-const WIDGET_URL = LANG === "fr" ? SEARCH_URL_FR : SEARCH_URL_DE;
+const LANG = detectLangAuto();
+const cfg = CFG[LANG];
 
-// ------------------ Utils ------------------
-async function fetchJSON(url) {
-  const r = new Request(url);
-  r.headers = { "Accept": "application/json" };
-  r.timeoutInterval = 20;
-  return await r.loadJSON();
+// ----------------- Cache -----------------
+const fm = FileManager.local();
+const dir = fm.joinPath(fm.documentsDirectory(), "cdf-efk-parliament");
+if (!fm.fileExists(dir)) fm.createDirectory(dir, true);
+
+const PATH_CACHE_ITEMS = fm.joinPath(dir, `cache_items_${LANG}.json`);   // [{shortId,title,author,party}]
+const PATH_SEEN_IDS = fm.joinPath(dir, `seen_ids_${LANG}.json`);         // [shortId...]
+const PATH_LAST_NEW = fm.joinPath(dir, `last_new_${LANG}.json`);         // [shortId...]
+const PATH_LAST_UPDATE = fm.joinPath(dir, `last_update_${LANG}.txt`);    // ISO date
+
+function readJSON(path, fallback) {
+  try {
+    if (!fm.fileExists(path)) return fallback;
+    return JSON.parse(fm.readString(path));
+  } catch (_) {
+    return fallback;
+  }
+}
+function writeJSON(path, obj) {
+  try {
+    fm.writeString(path, JSON.stringify(obj));
+  } catch (_) {}
+}
+function readText(path, fallback = "") {
+  try {
+    if (!fm.fileExists(path)) return fallback;
+    return fm.readString(path);
+  } catch (_) {
+    return fallback;
+  }
+}
+function writeText(path, txt) {
+  try {
+    fm.writeString(path, txt);
+  } catch (_) {}
 }
 
-async function tryFetchList(pageNumber) {
-  const url = `${BASE}/affairs?format=json&lang=en&pageNumber=${pageNumber}`;
+function shouldDoDailyUpdate() {
+  const now = new Date();
+  const last = new Date(readText(PATH_LAST_UPDATE, "1970-01-01T00:00:00.000Z"));
+
+  const todayUpdate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), UPDATE_HOUR, UPDATE_MINUTE);
+
+  // si on a passé l'heure d'update aujourd'hui et qu'on n'a pas encore fait l'update d'aujourd'hui
+  return now >= todayUpdate && last < todayUpdate;
+}
+
+// ----------------- Helpers texte -----------------
+function normalize(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+function normalizeLower(s) {
+  return normalize(s).toLowerCase();
+}
+function stripHtml(s) {
+  return normalize(String(s || "").replace(/<[^>]*>/g, " "));
+}
+function clamp(s, max) {
+  const t = String(s || "");
+  if (t.length <= max) return t;
+  return t.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+}
+function extractSurname(fullName) {
+  const parts = normalize(fullName).split(" ").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : normalize(fullName);
+}
+
+// ----------------- API requests -----------------
+async function fetchJSON(url) {
+  const req = new Request(url);
+  req.headers = {
+    "Accept": "application/json",
+    "Accept-Language": cfg.acceptLang,
+    // IMPORTANT: user-agent "navigateur" pour éviter des réponses vides/incomplètes
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+  };
+  req.timeoutInterval = 25;
+  return await req.loadJSON();
+}
+
+async function tryFetchAffairsPage(pageNumber) {
+  const url = `${API_BASE}/affairs?format=json&lang=en&pageNumber=${pageNumber}`;
   try {
     const data = await fetchJSON(url);
-    if (!Array.isArray(data) || data.length === 0) return null;
-    return data;
-  } catch (e) {
+    return Array.isArray(data) ? data : null;
+  } catch (_) {
     return null;
   }
 }
 
+// Trouver la dernière page (la plus récente)
 async function findLastPage() {
   // Exponential search
   let low = 1;
   let high = 1;
 
   while (true) {
-    const data = await tryFetchList(high);
-    if (!data) break;
+    const data = await tryFetchAffairsPage(high);
+    if (!data || data.length === 0) break;
 
     const last = data[data.length - 1];
     if (last && last.hasMorePages === false) return high;
@@ -86,20 +172,19 @@ async function findLastPage() {
     low = high;
     high *= 2;
 
-    // sécurité
-    if (high > 20000) break;
+    if (high > 20000) break; // garde-fou
   }
 
-  // Binary search between (low+1) and (high-1)
+  // Binary search
   let left = low + 1;
   let right = high - 1;
   let best = low;
 
   while (left <= right) {
     const mid = Math.floor((left + right) / 2);
-    const data = await tryFetchList(mid);
+    const data = await tryFetchAffairsPage(mid);
 
-    if (!data) {
+    if (!data || data.length === 0) {
       right = mid - 1;
       continue;
     }
@@ -116,266 +201,232 @@ async function findLastPage() {
   return best;
 }
 
-function normalizeText(s) {
-  return String(s || "")
-    .replace(/\s+/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .toLowerCase();
-}
-
-function stripHtml(html) {
-  return String(html || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-}
-
-async function fetchAffair(id, lang) {
-  const url = `${BASE}/affairs/${id}?format=json&lang=${encodeURIComponent(lang)}`;
+async function fetchAffairById(id) {
+  const url = `${API_BASE}/affairs/${id}?format=json&lang=${encodeURIComponent(cfg.apiLang)}`;
   return await fetchJSON(url);
 }
 
-async function fetchCouncillorParty(councillorId, lang) {
+async function fetchCouncillorParty(councillorId) {
   if (!councillorId) return null;
-  const url = `${BASE}/councillors/${councillorId}?format=json&lang=${encodeURIComponent(lang)}`;
+  const url = `${API_BASE}/councillors/${councillorId}?format=json&lang=${encodeURIComponent(cfg.apiLang)}`;
   try {
     const c = await fetchJSON(url);
-    // champs variables selon versions: on tente plusieurs
+    // différents schémas possibles selon l’API
     return (
       c?.party?.abbreviation ||
       c?.partyAbbreviation ||
       c?.party?.name ||
       null
     );
-  } catch (e) {
+  } catch (_) {
     return null;
   }
 }
 
-function getAuthorNameAndParty(affair) {
-  const a = affair?.author || {};
-  const c = a?.councillor;
+function affairContainsKeyword(affair, keyword) {
+  const k = normalizeLower(keyword);
 
-  if (!c) {
-    // ex: affaire portée par une commission
-    const comm = a?.committee;
-    if (comm?.abbreviation1) return { name: comm.abbreviation1, party: null };
-    if (comm?.name) return { name: comm.name, party: null };
-    return { name: LANG === "fr" ? "—" : "—", party: null };
-  }
+  const title = normalizeLower(stripHtml(affair?.title || ""));
+  if (title.includes(k)) return true;
 
-  const lastName =
-    c.officialDenomination ||
-    (c.name ? String(c.name).trim().split(/\s+/).slice(-1)[0] : null) ||
-    "—";
-
-  // le JSON de l'affaire donne souvent la *fraction* (groupe) et pas le parti
-  // => le parti sera complété via /councillors/<id> si possible
-  return { name: lastName, party: null, councillorId: c.id };
+  const texts = Array.isArray(affair?.texts) ? affair.texts : [];
+  const blob = normalizeLower(texts.map(t => stripHtml(t?.value || "")).join(" "));
+  return blob.includes(k);
 }
 
-async function getLatestMatchingInterpellations() {
+function getShortId(affair, fallbackId) {
+  return normalize(affair?.shortId || affair?.shortIdFormatted || fallbackId);
+}
+
+function getAuthorSurname(affair) {
+  // councillor
+  const c = affair?.author?.councillor;
+  if (c) {
+    const name =
+      c.officialDenomination ||
+      c.officialDenominationWithTitle ||
+      c.name ||
+      c.firstName + " " + c.lastName ||
+      "";
+    return extractSurname(name);
+  }
+
+  // committee (rare)
+  const comm = affair?.author?.committee;
+  if (comm?.abbreviation1) return normalize(comm.abbreviation1);
+  if (comm?.name) return normalize(comm.name);
+
+  return "—";
+}
+
+async function getLatestMatches(maxMatches = 12, maxPagesBack = 10) {
   const lastPage = await findLastPage();
+  const matches = [];
 
-  const results = [];
-  const matchedShortIdsForNewCheck = [];
+  // on scanne depuis la fin, quelques pages en arrière
+  for (let p = lastPage; p >= Math.max(1, lastPage - maxPagesBack); p--) {
+    const pageList = await tryFetchAffairsPage(p);
+    if (!pageList || pageList.length === 0) continue;
 
-  // On regarde quelques pages en arrière pour trouver 3 matchs
-  for (let p = lastPage; p >= Math.max(1, lastPage - 6); p--) {
-    const pageList = await tryFetchList(p);
-    if (!pageList) continue;
-
-    // derniers d'abord
+    // du plus récent au plus ancien à l’intérieur de la page
     for (let i = pageList.length - 1; i >= 0; i--) {
       const item = pageList[i];
-      if (!item?.id) continue;
+      const id = item?.id;
+      if (!id) continue;
 
       let affair;
       try {
-        affair = await fetchAffair(item.id, LANG);
-      } catch (e) {
+        affair = await fetchAffairById(id);
+      } catch (_) {
         continue;
       }
 
-      // type interpellation
-      const tId = affair?.affairType?.id;
-      if (!TYPE_IDS.has(tId)) continue;
+      const typeId = affair?.affairType?.id;
+      if (!INTERPELLATION_TYPE_IDS.has(typeId)) continue;
 
-      // contient le mot-clé (dans titre ou textes)
-      const haystack =
-        normalizeText(affair?.title) +
-        " " +
-        normalizeText((affair?.texts || []).map(x => x?.value || "").join(" "));
-      if (!haystack.includes(normalizeText(KEYWORD))) continue;
+      if (!affairContainsKeyword(affair, cfg.keyword)) continue;
 
-      // infos
-      const shortId = affair?.shortId || String(item.id);
-      const title = affair?.title || "";
-      const authorInfo = getAuthorNameAndParty(affair);
+      const shortId = getShortId(affair, String(id));
+      const title = stripHtml(affair?.title || "");
+      const authorSurname = getAuthorSurname(affair);
 
-      // parti via endpoint councillor (max 3 appels au final)
       let party = null;
-      if (authorInfo?.councillorId) {
-        party = await fetchCouncillorParty(authorInfo.councillorId, LANG);
-      }
+      const councillorId = affair?.author?.councillor?.id;
+      if (councillorId) party = await fetchCouncillorParty(councillorId);
 
-      results.push({
+      matches.push({
         shortId,
-        title: stripHtml(title),
-        authorLastName: authorInfo.name,
-        party: party ? String(party).trim() : null,
+        title: normalize(title),
+        author: authorSurname,
+        party: party ? normalize(party) : null,
       });
 
-      matchedShortIdsForNewCheck.push(shortId);
-
-      if (results.length >= 3) return { results, allMatchedIdsToday: matchedShortIdsForNewCheck, lastPage };
+      if (matches.length >= maxMatches) return matches;
     }
   }
 
-  return { results, allMatchedIdsToday: matchedShortIdsForNewCheck, lastPage };
+  return matches;
 }
 
-// ------------------ Cache "hier" ------------------
-function cachePath(lang) {
-  const fm = FileManager.local();
-  return fm.joinPath(fm.documentsDirectory(), `cdf_efk_parliament_cache_${lang}.json`);
+// ----------------- Widget UI -----------------
+function addCenteredTitle(w, text) {
+  const s = w.addStack();
+  s.layoutHorizontally();
+  s.addSpacer();
+  const t = s.addText(text);
+  t.font = Font.boldSystemFont(14);
+  t.textColor = new Color("#111111");
+  s.addSpacer();
 }
 
-function readCache(lang) {
-  const fm = FileManager.local();
-  const p = cachePath(lang);
-  try {
-    if (!fm.fileExists(p)) return [];
-    const raw = fm.readString(p);
-    const json = JSON.parse(raw);
-    return Array.isArray(json) ? json : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-function writeCache(lang, arr) {
-  const fm = FileManager.local();
-  const p = cachePath(lang);
-  try {
-    fm.writeString(p, JSON.stringify(arr));
-  } catch (e) {}
-}
-
-function shouldUpdateNow() {
-  const now = new Date();
-  if (now.getHours() > UPDATE_HOUR) return true;
-  if (now.getHours() < UPDATE_HOUR) return false;
-  return now.getMinutes() >= UPDATE_MINUTE;
-}
-
-// ------------------ Widget UI ------------------
-function makeLine(stack, text, font, color) {
-  const t = stack.addText(text);
-  t.font = font;
-  t.textColor = color;
+function addCenteredLine(w, text, bold = false, color = null) {
+  const s = w.addStack();
+  s.layoutHorizontally();
+  s.addSpacer();
+  const t = s.addText(text);
+  t.font = bold ? Font.boldSystemFont(12) : Font.systemFont(12);
+  t.textColor = color || new Color("#111111");
   t.lineLimit = 1;
-  return t;
+  s.addSpacer();
 }
 
-function addSpacerH(stack, n) {
-  for (let i = 0; i < n; i++) stack.addSpacer(1);
+function addLabelValueLine(w, label, value, valueColor) {
+  const s = w.addStack();
+  s.layoutHorizontally();
+  const l = s.addText(label);
+  l.font = Font.boldSystemFont(11);
+  l.textColor = new Color("#666666");
+
+  const v = s.addText(value);
+  v.font = Font.systemFont(11);
+  v.textColor = valueColor || new Color("#111111");
+  v.lineLimit = 1;
 }
 
-async function buildWidget() {
-  const w = new ListWidget();
-  w.backgroundColor = BG;
-  w.url = WIDGET_URL;
-  w.setPadding(12, 12, 12, 12);
+function addItemBlock(w, it) {
+  // ligne 1: numéro — titre (1 ligne)
+  const header = `${it.shortId} — ${clamp(it.title, 70)}`;
+  const h = w.addText(header);
+  h.font = Font.boldSystemFont(11);
+  h.textColor = new Color("#111111");
+  h.lineLimit = 1;
 
-  // Header
-  const header = w.addStack();
-  header.layoutHorizontally();
-  header.addSpacer();
-  const titleTxt = header.addText(TITLE);
-  titleTxt.font = Font.boldSystemFont(14);
-  titleTxt.textColor = TEXT_PRIMARY;
-  header.addSpacer();
-
-  w.addSpacer(8);
-
-  // Data
-  const { results, allMatchedIdsToday } = await getLatestMatchingInterpellations();
-
-  // "Nouveaux numéros depuis hier" ligne
-  const prev = readCache(LANG);
-  const curr = allMatchedIdsToday || [];
-  const newOnes = curr.filter(x => !prev.includes(x));
-
-  const newLine = w.addStack();
-  newLine.layoutHorizontally();
-
-  const newText =
-    newOnes.length > 0 ? newOnes.join("  ") : "❌";
-  const newLabel =
-    LANG === "fr" ? "Nouveaux: " : "Neu: ";
-
-  const labelTxt = newLine.addText(newLabel);
-  labelTxt.font = Font.boldSystemFont(11);
-  labelTxt.textColor = TEXT_SECONDARY;
-
-  const valTxt = newLine.addText(newText);
-  valTxt.font = Font.systemFont(11);
-  valTxt.textColor = newOnes.length > 0 ? RED : TEXT_SECONDARY;
-  valTxt.lineLimit = 1;
-
-  w.addSpacer(10);
-
-  // 3 dernières interpellations
-  if (!results || results.length === 0) {
-    const empty = w.addText(LANG === "fr" ? "Aucune interpellation trouvée." : "Keine Interpellation gefunden.");
-    empty.font = Font.systemFont(12);
-    empty.textColor = TEXT_SECONDARY;
-  } else {
-    for (let i = 0; i < results.length; i++) {
-      const it = results[i];
-
-      const row = w.addStack();
-      row.layoutVertically();
-
-      // Ligne 1: numéro + auteur
-      const top = row.addStack();
-      top.layoutHorizontally();
-
-      const num = top.addText(it.shortId);
-      num.font = Font.boldSystemFont(12);
-      num.textColor = TEXT_PRIMARY;
-
-      top.addSpacer(8);
-
-      const who = `${it.authorLastName}${it.party ? " (" + it.party + ")" : ""}`;
-      const whoTxt = top.addText(who);
-      whoTxt.font = Font.systemFont(11);
-      whoTxt.textColor = TEXT_SECONDARY;
-      whoTxt.lineLimit = 1;
-
-      // Ligne 2: titre
-      const ttl = row.addText(it.title);
-      ttl.font = Font.systemFont(11);
-      ttl.textColor = TEXT_PRIMARY;
-      ttl.lineLimit = 2;
-
-      if (i < results.length - 1) w.addSpacer(8);
-    }
-  }
-
-  // Mise à jour cache (1x/jour)
-  if (shouldUpdateNow()) {
-    writeCache(LANG, curr);
-  }
-
-  return w;
+  // ligne 2: Nom (Parti)
+  const who = it.party ? `${it.author} (${it.party})` : it.author;
+  const a = w.addText(clamp(who, 40));
+  a.font = Font.systemFont(10);
+  a.textColor = new Color("#666666");
+  a.lineLimit = 1;
 }
 
-// ------------------ Run ------------------
-const widget = await buildWidget();
+// ----------------- Main -----------------
+const w = new ListWidget();
+w.backgroundColor = new Color("#FFFFFF");
+w.url = cfg.openUrl; // clic -> Curia Vista (URL EXACTE)
+w.setPadding(6, 12, 12, 12);
 
-if (config.runsInWidget) {
-  Script.setWidget(widget);
+// titre centré haut
+addCenteredTitle(w, cfg.title);
+w.addSpacer(8);
+
+// On essaie de fetch; sinon fallback cache
+let fetched = [];
+try {
+  fetched = await getLatestMatches(12, 10); // récupère plusieurs matches pour détecter "nouveaux"
+} catch (_) {
+  fetched = [];
+}
+
+let items = Array.isArray(fetched) && fetched.length ? fetched : readJSON(PATH_CACHE_ITEMS, []);
+if (!Array.isArray(items)) items = [];
+
+// Sauver cache items si on a des résultats
+if (Array.isArray(fetched) && fetched.length) {
+  writeJSON(PATH_CACHE_ITEMS, fetched);
+}
+
+// Liste des IDs matchés "aujourd’hui" (pour comparer)
+const matchedIdsToday = items.map(x => x.shortId).filter(Boolean);
+
+// Daily update : calcule "nouveaux depuis hier" une fois par jour à l’heure définie
+let newIdsToShow = readJSON(PATH_LAST_NEW, []);
+
+if (shouldDoDailyUpdate()) {
+  const seen = readJSON(PATH_SEEN_IDS, []);
+  const seenSet = new Set(Array.isArray(seen) ? seen : []);
+
+  const newIds = matchedIdsToday.filter(id => !seenSet.has(id));
+
+  writeJSON(PATH_LAST_NEW, newIds);
+  writeJSON(PATH_SEEN_IDS, matchedIdsToday);
+  writeText(PATH_LAST_UPDATE, new Date().toISOString());
+
+  newIdsToShow = newIds;
+}
+
+// Ligne “Nouveaux/Neu”
+if (Array.isArray(newIdsToShow) && newIdsToShow.length) {
+  // sur une ligne, uniquement les numéros
+  addLabelValueLine(w, `${cfg.labelNew}: `, newIdsToShow.join(" / "), new Color("#E30613"));
 } else {
-  // aperçu
-  await widget.presentMedium();
+  addLabelValueLine(w, `${cfg.labelNew}: `, "❌", new Color("#666666"));
 }
+
+w.addSpacer(10);
+
+// 3 dernières interpellations (les plus récentes matchées)
+const last3 = items.slice(0, 3);
+
+if (!last3.length) {
+  const t = w.addText(LANG === "fr" ? "Aucune interpellation trouvée." : "Keine Interpellation gefunden.");
+  t.font = Font.systemFont(12);
+  t.textColor = new Color("#666666");
+} else {
+  for (let i = 0; i < last3.length; i++) {
+    addItemBlock(w, last3[i]);
+    if (i < last3.length - 1) w.addSpacer(8);
+  }
+}
+
+Script.setWidget(w);
 Script.complete();
