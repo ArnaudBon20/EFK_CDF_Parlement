@@ -9,7 +9,7 @@
  * Affichage:
  * - Titre centré en haut
  * - Ligne "Nouveaux/Neu": numéros des nouvelles interpellations depuis la dernière mise à jour quotidienne, sinon ❌
- * - 3 dernières interpellations: numéro + titre + Nom (Parti) si possible
+ * - 3 dernières affaires: numéro + titre + Nom (Parti) si possible
  *
  * Tap sur le widget -> ouvre les URLs Curia Vista (FR/DE) EXACTES.
  *
@@ -30,9 +30,6 @@ const CV_DE =
 
 // --- Open Data / API ---
 const API_BASE = "https://ws-old.parlament.ch";
-
-// 8 = Interpellation, 9 = Interpellation urgente
-const INTERPELLATION_TYPE_IDS = new Set([8, 9]);
 
 const CFG = {
   fr: {
@@ -248,7 +245,7 @@ function getAuthorSurname(affair) {
 }
 
 async function getNewMatches() {
-  console.log("[DEBUG] Recherche des interpellations CDF/EFK...");
+  console.log("[DEBUG] Recherche des affaires CDF/EFK...");
   
   // Rechercher directement par mot-clé
   const searchResults = await searchAffairsByKeyword();
@@ -280,14 +277,7 @@ async function getNewMatches() {
       continue;
     }
     
-    const typeId = affair?.affairType?.id;
     const shortId = getShortId(affair, String(id));
-    
-    // Filtrer uniquement les interpellations (type 8 et 9)
-    if (!INTERPELLATION_TYPE_IDS.has(typeId)) {
-      console.log(`[DEBUG] ${shortId}: Type ${typeId} ignoré`);
-      continue;
-    }
     
     const title = normalize(stripHtml(affair?.title || ""));
     const authorSurname = getAuthorSurname(affair);
@@ -308,10 +298,10 @@ async function getNewMatches() {
       author: authorSurname,
       party: party ? normalize(party) : null,
     });
-    console.log(`[DEBUG] Interpellation trouvée: ${shortId}`);
+    console.log(`[DEBUG] Affaire trouvée: ${shortId}`);
     
     if (matches.length >= 10) {
-      console.log(`[DEBUG] 10 interpellations trouvées, arrêt`);
+      console.log(`[DEBUG] 10 affaires trouvées, arrêt`);
       break;
     }
   }
@@ -321,7 +311,7 @@ async function getNewMatches() {
     writeText(PATH_LAST_AFFAIR_ID, String(newLastId));
   }
   
-  console.log(`[DEBUG] Total interpellations: ${matches.length}`);
+  console.log(`[DEBUG] Total affaires: ${matches.length}`);
   return matches;
 }
 
@@ -401,7 +391,7 @@ if (isCacheValid() && cacheHasData) {
   try {
     fetched = await getNewMatches();
     fetchOk = Array.isArray(fetched);
-    console.log(`[DEBUG] Fetch OK: ${fetchOk}, Interpellations trouvées: ${fetched.length}`);
+    console.log(`[DEBUG] Fetch OK: ${fetchOk}, Affaires trouvées: ${fetched.length}`);
   } catch (e) {
     fetchOk = false;
     errorMsg = String(e);
@@ -415,7 +405,7 @@ if (isCacheValid() && cacheHasData) {
     items = items.slice(0, 20);
     writeJSON(PATH_CACHE_ITEMS, items);
     writeText(PATH_LAST_FETCH, new Date().toISOString());
-    console.log(`[DEBUG] Cache mis à jour avec ${fetched.length} nouvelles interpellations`);
+    console.log(`[DEBUG] Cache mis à jour avec ${fetched.length} nouvelles affaires`);
   } else {
     items = cachedItems;
   }
@@ -453,7 +443,7 @@ if (newIdsToShow.length) {
 
 w.addSpacer(10);
 
-// 3 dernières
+// 3 dernières affaires
 const last3 = items.slice(0, 3);
 
 if (!last3.length) {
