@@ -1,7 +1,4 @@
-// Données CDF/EFK - Généré automatiquement par Recherche_CDF_EFK.R
-// Dernière mise à jour: 2026-02-04 14:02:28.642798
-
-const CDF_DATA = [
+[
   {
     "shortId": "25.4785",
     "title": "La rémunération des tâches confiées à l'OFDF dans les aéroports de Genève et Bâle doit profiter à l'OFDF !",
@@ -92,7 +89,4 @@ const CDF_DATA = [
     "url_fr": "https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20254188",
     "url_de": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20254188"
   }
-];
-
-module.exports = CDF_DATA;
-
+]

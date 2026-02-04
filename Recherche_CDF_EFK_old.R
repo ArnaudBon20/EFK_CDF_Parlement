@@ -1,19 +1,13 @@
 # Script pour trouver les interpellations, motions, questions et postulats
 # mentionnant le Contrôle fédéral des finances (CDF/EFK)
 # en français et en allemand
-#
-# VERSION 2.0 - Recherche incrémentale
-# - Charge les données existantes depuis l'Excel
-# - Ne recherche que les interventions des 6 derniers mois
-# - Met à jour l'Excel avec les nouvelles interventions
-# - Exporte un JSON pour GitHub
 
 # Force HTTP/1.1 to avoid curl HTTP/2 framing errors
 library(httr)
 httr::set_config(httr::config(http_version = 1.1))
 
 packages <- c(
-  "dplyr", "swissparl", "stringr", "openxlsx", "tidyr", "xfun", "jsonlite", "lubridate"
+  "dplyr", "swissparl", "stringr", "openxlsx", "tidyr", "xfun", "jsonlite"
 )
 
 missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]
@@ -32,6 +26,7 @@ invisible(lapply(packages, library, character.only = TRUE))
 # RÉPERTOIRE DE TRAVAIL
 # ============================================================================
 
+# Définir le répertoire de travail au dossier du script
 script_dir <- "/Users/arnaudbonvin/Documents/Windsurf/EFK Parlament"
 setwd(script_dir)
 cat("Répertoire de travail:", getwd(), "\n\n")
@@ -43,28 +38,31 @@ cat("Répertoire de travail:", getwd(), "\n\n")
 # Législature à analyser (52 = 2023-2027)
 Legislatur <- 52
 
-# Nombre de mois à rechercher pour les mises à jour
-MOIS_MISE_A_JOUR <- 6
-
-# Types d'affaires à rechercher
+# Types d'affaires à rechercher:
+# 5 = Motion
+# 6 = Postulat
+# 8 = Interpellation
+# 9 = Interpellation urgente
+# 10 = Interpellation urgente
+# 12 = Question ordinaire
+# 13 = Question urgente
+# 14 = Question heure des questions
+# 18 = Anfrage (Question)
+# 19 = Anfrage dringlich (Question urgente)
 Geschaeftstyp <- c(5, 6, 8, 9, 10, 12, 13, 14, 18, 19)
-
-# Fichiers
-FICHIER_EXCEL <- "Objets_parlementaires_CDF_EFK.xlsx"
-FICHIER_JSON <- "cdf_efk_data.json"
-
-# URL GitHub pour le widget
-GITHUB_RAW_URL <- "https://raw.githubusercontent.com/ArnaudBon20/EFK_CDF_Parlement/main/cdf_efk_data.json"
 
 # ============================================================================
 # PATTERNS DE RECHERCHE
 # ============================================================================
 
+# Pattern allemand: Eidgenössische Finanzkontrolle, EFK
 pattern_efk_de <- regex(
+
   "\\b(Eidg(en(ö|oe)ssische)?|Eidg\\.)\\s*Finanzkontrolle\\b|\\(\\s*EFK\\s*\\)|\\bEFK\\b",
   ignore_case = TRUE
 )
 
+# Pattern français: Contrôle fédéral des finances, CDF
 pattern_cdf_fr <- regex(
   "\\bContr(ô|o)le\\s+f(é|e)d(é|e)ral\\s+des\\s+finances\\b|\\(\\s*CDF\\s*\\)|\\bCDF\\b",
   ignore_case = TRUE
@@ -91,33 +89,7 @@ concatener_textes <- function(df) {
 }
 
 # ============================================================================
-# CHARGER LES DONNÉES EXISTANTES
-# ============================================================================
-
-Donnees_Existantes <- NULL
-IDs_Existants <- c()
-
-if (file.exists(FICHIER_EXCEL)) {
-  cat("Chargement des données existantes depuis", FICHIER_EXCEL, "...\n")
-  Donnees_Existantes <- read.xlsx(FICHIER_EXCEL, detectDates = TRUE)
-  
-  # Convertir les dates numériques Excel en dates lisibles
-  if ("Date_dépôt" %in% names(Donnees_Existantes)) {
-    Donnees_Existantes <- Donnees_Existantes |>
-      mutate(Date_dépôt = case_when(
-        is.numeric(Date_dépôt) ~ format(as.Date(Date_dépôt, origin = "1899-12-30"), "%Y-%m-%d"),
-        TRUE ~ as.character(Date_dépôt)
-      ))
-  }
-  
-  IDs_Existants <- Donnees_Existantes$ID
-  cat("  ->", nrow(Donnees_Existantes), "interventions existantes\n\n")
-} else {
-  cat("Pas de fichier existant. Recherche complète...\n\n")
-}
-
-# ============================================================================
-# DÉTERMINER LES SESSIONS À RECHERCHER
+# RÉCUPÉRATION DES SESSIONS
 # ============================================================================
 
 cat("Récupération des sessions de la législature", Legislatur, "...\n")
@@ -127,26 +99,10 @@ Sessionen <- get_data(
   Language = "DE",
   LegislativePeriodNumber = Legislatur
 ) |>
-  select(ID, SessionName, StartDate, EndDate) |>
-  mutate(
-    StartDate = as.Date(StartDate),
-    EndDate = as.Date(EndDate)
-  )
+  select(ID, SessionName, StartDate, EndDate)
 
-# Si données existantes, ne chercher que les sessions des 6 derniers mois
-date_limite <- Sys.Date() - months(MOIS_MISE_A_JOUR)
-
-if (!is.null(Donnees_Existantes)) {
-  Sessions_A_Chercher <- Sessionen |>
-    filter(EndDate >= date_limite | is.na(EndDate))
-  cat("Mode incrémental: sessions depuis", format(date_limite, "%d.%m.%Y"), "\n")
-} else {
-  Sessions_A_Chercher <- Sessionen
-  cat("Mode complet: toutes les sessions\n")
-}
-
-SessionID <- Sessions_A_Chercher$ID
-cat("Sessions à analyser:", length(SessionID), "\n\n")
+SessionID <- Sessionen$ID
+cat("Nombre de sessions trouvées:", length(SessionID), "\n\n")
 
 # ============================================================================
 # RECHERCHE EN ALLEMAND (EFK)
@@ -233,13 +189,15 @@ Geschaefte_FR <- bind_rows(Geschaefte_FR)
 cat("Total objets trouvés en français:", nrow(Geschaefte_FR), "\n\n")
 
 # ============================================================================
-# FUSION DES RÉSULTATS DE LA RECHERCHE
+# FUSION DES RÉSULTATS (DÉDOUBLONNAGE PAR ID)
 # ============================================================================
 
 cat("Fusion et dédoublonnage des résultats...\n")
 
+# Combiner les deux dataframes
 Tous_Geschaefte <- bind_rows(Geschaefte_DE, Geschaefte_FR)
 
+# Garder les IDs uniques (un objet peut être trouvé dans les deux langues)
 Geschaefte_Uniques <- Tous_Geschaefte |>
   group_by(ID) |>
   summarise(
@@ -252,36 +210,31 @@ Geschaefte_Uniques <- Tous_Geschaefte |>
     .groups = "drop"
   )
 
-# Identifier les nouveaux IDs et ceux à mettre à jour
-Nouveaux_IDs <- setdiff(Geschaefte_Uniques$ID, IDs_Existants)
-IDs_A_Mettre_A_Jour <- intersect(Geschaefte_Uniques$ID, IDs_Existants)
-
-cat("Nouveaux objets:", length(Nouveaux_IDs), "\n")
-cat("Objets à mettre à jour:", length(IDs_A_Mettre_A_Jour), "\n\n")
+cat("Nombre d'objets uniques:", nrow(Geschaefte_Uniques), "\n\n")
 
 # ============================================================================
-# RÉCUPÉRATION DES DÉTAILS COMPLETS (nouveaux + màj)
+# RÉCUPÉRATION DES DÉTAILS COMPLETS
 # ============================================================================
 
-IDs_A_Traiter <- c(Nouveaux_IDs, IDs_A_Mettre_A_Jour)
-
-if (length(IDs_A_Traiter) > 0) {
+if (nrow(Geschaefte_Uniques) > 0) {
   
-  cat("Récupération des détails pour", length(IDs_A_Traiter), "objets...\n")
+  ListeID <- Geschaefte_Uniques$ID
+  
+  cat("Récupération des détails complets...\n")
   
   # Données en allemand
-  Daten_DE <- get_data(table = "Business", ID = IDs_A_Traiter, Language = "DE") |>
+  Daten_DE <- get_data(table = "Business", ID = ListeID, Language = "DE") |>
     select(ID, BusinessShortNumber, BusinessTypeAbbreviation, Title, 
            SubmittedBy, BusinessStatusText, SubmissionDate, SubmissionCouncilAbbreviation)
   
   # Données en français
-  Daten_FR <- get_data(table = "Business", ID = IDs_A_Traiter, Language = "FR") |>
+  Daten_FR <- get_data(table = "Business", ID = ListeID, Language = "FR") |>
     select(ID, Title, BusinessStatusText)
   
   names(Daten_FR) <- c("ID", "Titre_FR", "Statut_FR")
   
   # Fusion
-  Nouveaux_Resultats <- Daten_DE |>
+  Resultats <- Daten_DE |>
     left_join(Daten_FR, by = "ID") |>
     left_join(
       Geschaefte_Uniques |> select(ID, Langues_Detection),
@@ -290,120 +243,49 @@ if (length(IDs_A_Traiter) > 0) {
     mutate(
       Lien_DE = paste0("https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=", ID),
       Lien_FR = paste0("https://www.parlament.ch/fr/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=", ID)
-    )
+    ) |>
+    arrange(desc(SubmissionDate))
   
   # Renommer les colonnes
-  names(Nouveaux_Resultats) <- c(
-    "ID", "Numéro", "Type", "Titre_DE", "Auteur",
+  names(Resultats) <- c(
+    "ID", "Numéro", "Type", "Titre_DE", "Auteur", 
     "Statut_DE", "Date_dépôt", "Conseil",
     "Titre_FR", "Statut_FR", "Langue_détection",
     "Lien_DE", "Lien_FR"
   )
   
-  # Convertir Date_dépôt en caractère pour éviter les conflits de type
-  Nouveaux_Resultats <- Nouveaux_Resultats |>
-    mutate(Date_dépôt = as.character(Date_dépôt))
-  
   # ============================================================================
-  # FUSIONNER AVEC LES DONNÉES EXISTANTES
+  # EXPORT EXCEL
   # ============================================================================
   
-  if (!is.null(Donnees_Existantes)) {
-    # Convertir les dates existantes en caractère aussi
-    Donnees_Existantes <- Donnees_Existantes |>
-      mutate(Date_dépôt = as.character(Date_dépôt))
-    
-    # Retirer les objets mis à jour des données existantes
-    Donnees_Existantes_Filtrees <- Donnees_Existantes |>
-      filter(!ID %in% IDs_A_Mettre_A_Jour)
-    
-    # Combiner
-    Resultats <- bind_rows(Donnees_Existantes_Filtrees, Nouveaux_Resultats) |>
-      arrange(desc(Date_dépôt))
-    
-    cat("Fusion avec données existantes...\n")
-    cat("  - Conservés:", nrow(Donnees_Existantes_Filtrees), "\n")
-    cat("  - Ajoutés/Mis à jour:", nrow(Nouveaux_Resultats), "\n")
-  } else {
-    Resultats <- Nouveaux_Resultats |>
-      arrange(desc(Date_dépôt))
-  }
+  fichier_sortie <- "Objets_parlementaires_CDF_EFK.xlsx"
   
-} else {
-  cat("Aucun nouvel objet ou mise à jour.\n")
-  Resultats <- Donnees_Existantes
-}
-
-# ============================================================================
-# EXPORT EXCEL
-# ============================================================================
-
-if (!is.null(Resultats) && nrow(Resultats) > 0) {
-  
-  cat("\nExport vers", FICHIER_EXCEL, "...\n")
+  cat("Export vers", fichier_sortie, "...\n")
   
   write.xlsx(
     Resultats, 
-    file = FICHIER_EXCEL,
+    file = fichier_sortie,
     overwrite = TRUE, 
     asTable = TRUE, 
     sheetName = "CDF-EFK"
   )
   
   # ============================================================================
-  # EXPORT JSON POUR GITHUB
+  # EXPORT JSON POUR LE WIDGET SCRIPTABLE
   # ============================================================================
   
-  cat("Export JSON pour GitHub...\n")
-  
-  # Préparer les données pour le JSON
-  Donnees_JSON <- Resultats |>
-    head(20) |>
-    mutate(
-      shortId = Numéro,
-      title = Titre_FR,
-      title_de = Titre_DE,
-      author = Auteur,
-      type = Type,
-      status = Statut_FR,
-      status_de = Statut_DE,
-      council = Conseil,
-      date = as.character(Date_dépôt),
-      url_fr = Lien_FR,
-      url_de = Lien_DE
-    ) |>
-    select(shortId, title, title_de, author, type, status, status_de, 
-           council, date, url_fr, url_de)
-  
-  # Créer l'objet JSON avec métadonnées
-  json_export <- list(
-    meta = list(
-      updated = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
-      total_count = nrow(Resultats),
-      source = "Swiss Parliament API",
-      legislature = Legislatur
-    ),
-    items = Donnees_JSON
-  )
-  
-  # Écrire le JSON
-  json_content <- jsonlite::toJSON(json_export, pretty = TRUE, auto_unbox = TRUE)
-  writeLines(json_content, FICHIER_JSON)
-  cat("  ->", FICHIER_JSON, "\n")
-  
-  # ============================================================================
-  # EXPORT JS POUR SCRIPTABLE (iCloud)
-  # ============================================================================
-  
+  # Chemin vers le dossier iCloud Scriptable
   icloud_scriptable <- file.path(
     Sys.getenv("HOME"),
     "Library/Mobile Documents/iCloud~dk~simonbs~Scriptable/Documents"
   )
   
+  # Fichiers de sortie
+  fichier_js_local <- "CDF_Data.js"
   fichier_js_icloud <- file.path(icloud_scriptable, "CDF_Data.js")
   
-  # Format JS pour Scriptable
-  Derniers_JS <- Resultats |>
+  # Prendre les 10 derniers objets (triés par date décroissante)
+  Derniers <- Resultats |>
     head(10) |>
     mutate(
       shortId = Numéro,
@@ -415,43 +297,46 @@ if (!is.null(Resultats) && nrow(Resultats) > 0) {
     ) |>
     select(shortId, title, author, Type, updated, url_fr, url_de)
   
-  json_js <- jsonlite::toJSON(Derniers_JS, pretty = TRUE, auto_unbox = TRUE)
+  # Convertir en JSON
+  json_data <- jsonlite::toJSON(Derniers, pretty = TRUE, auto_unbox = TRUE)
   
+  # Créer le contenu du fichier JS
   js_content <- paste0(
     "// Données CDF/EFK - Généré automatiquement par Recherche_CDF_EFK.R\n",
     "// Dernière mise à jour: ", Sys.time(), "\n\n",
-    "const CDF_DATA = ", json_js, ";\n\n",
+    "const CDF_DATA = ", json_data, ";\n\n",
     "module.exports = CDF_DATA;\n"
   )
   
-  writeLines(js_content, "CDF_Data.js")
+  # Export local
+  writeLines(js_content, fichier_js_local)
+  cat("Export JS local:", fichier_js_local, "\n")
   
+  # Export vers iCloud Scriptable (si le dossier existe)
   if (dir.exists(icloud_scriptable)) {
     writeLines(js_content, fichier_js_icloud)
-    cat("  -> CDF_Data.js (iCloud Scriptable)\n")
+    cat("Export JS iCloud:", fichier_js_icloud, "\n")
+  } else {
+    cat("ATTENTION: Dossier iCloud Scriptable non trouvé.\n")
+    cat("Chemin attendu:", icloud_scriptable, "\n")
+    cat("Copiez manuellement le fichier CDF_Data.js dans Scriptable.\n")
   }
-  
-  # ============================================================================
-  # RÉSUMÉ
-  # ============================================================================
   
   cat("\n============================================\n")
   cat("RÉSUMÉ\n")
   cat("============================================\n")
-  cat("Mode:", ifelse(is.null(Donnees_Existantes), "Recherche complète", "Mise à jour incrémentale"), "\n")
   cat("Législature:", Legislatur, "\n")
   cat("Sessions analysées:", length(SessionID), "\n")
-  cat("Total objets:", nrow(Resultats), "\n")
-  cat("Nouveaux:", length(Nouveaux_IDs), "\n")
-  cat("Mis à jour:", length(IDs_A_Mettre_A_Jour), "\n")
+  cat("Objets trouvés:", nrow(Resultats), "\n")
   cat("\nRépartition par type:\n")
   print(table(Resultats$Type))
   cat("\nFichiers exportés:\n")
-  cat(" -", FICHIER_EXCEL, "\n")
-  cat(" -", FICHIER_JSON, "(pour GitHub)\n")
-  cat(" - CDF_Data.js (pour Scriptable)\n")
-  cat("\n⚠️  N'oubliez pas de commit/push", FICHIER_JSON, "sur GitHub!\n")
+  cat(" -", fichier_sortie, "\n")
+  cat(" -", fichier_js_local, "(JS local)\n")
+  if (dir.exists(icloud_scriptable)) {
+    cat(" -", fichier_js_icloud, "(iCloud Scriptable)\n")
+  }
   
 } else {
-  cat("Aucun résultat à exporter.\n")
+  cat("Aucun objet trouvé mentionnant le CDF/EFK.\n")
 }
