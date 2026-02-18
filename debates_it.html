@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="it">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CDF/EFK - Débats parlementaires</title>
+    <title>CDF/EFK - Dibattiti parlamentari</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -11,61 +11,61 @@
     <header>
         <div class="container header-content">
             <div class="header-main">
-                <h1><a href="home.html" style="color: inherit; text-decoration: none;">🏛️ Le CDF aux Chambres fédérales</a></h1>
+                <h1><a href="home_it.html" style="color: inherit; text-decoration: none;">🏛️ Il CDF alle Camere federali</a></h1>
                 <nav>
-                    <a href="home.html">Accueil</a>
-                    <a href="index.html">Objets</a>
-                    <a href="debates.html" class="active">Débats</a>
-                    <a href="stats.html">Statistiques</a>
+                    <a href="home_it.html">Home</a>
+                    <a href="index_it.html">Oggetti</a>
+                    <a href="debates_it.html" class="active">Dibattiti</a>
+                    <a href="stats_it.html">Statistiche</a>
                 </nav>
             </div>
             <div class="lang-switcher">
-                <a href="debates.html" class="active">FR</a>
+                <a href="debates.html">FR</a>
                 <span>|</span>
                 <a href="debates_de.html">DE</a>
                 <span>|</span>
-                <a href="debates_it.html">IT</a>
+                <a href="debates_it.html" class="active">IT</a>
             </div>
         </div>
     </header>
 
     <main class="container">
         <section class="search-section">
-            <h2>Débats parlementaires</h2>
-            <p class="section-intro">Interventions orales mentionnant le CDF lors des débats au Conseil national et au Conseil des États.</p>
+            <h2>Dibattiti parlamentari</h2>
+            <p class="section-intro">Interventi orali che menzionano il CDF durante i dibattiti al Consiglio nazionale e al Consiglio degli Stati.</p>
             
             <div class="search-box">
-                <input type="text" id="searchInput" placeholder="Rechercher dans les débats...">
-                <button id="clearSearch" class="btn-clear" title="Effacer">✕</button>
+                <input type="text" id="searchInput" placeholder="Cercare nei dibattiti...">
+                <button id="clearSearch" class="btn-clear" title="Cancellare">✕</button>
             </div>
             <div class="filters">
                 <div class="filter-dropdown" id="yearDropdown">
-                    <button class="filter-btn" type="button">Année <span class="filter-count"></span></button>
+                    <button class="filter-btn" type="button">Anno <span class="filter-count"></span></button>
                     <div class="filter-menu" id="yearMenu">
                     </div>
                 </div>
                 <div class="filter-dropdown" id="sessionDropdown">
-                    <button class="filter-btn" type="button">Session <span class="filter-count"></span></button>
+                    <button class="filter-btn" type="button">Sessione <span class="filter-count"></span></button>
                     <div class="filter-menu" id="sessionMenu">
                     </div>
                 </div>
                 <div class="filter-dropdown" id="councilDropdown">
-                    <button class="filter-btn" type="button">Conseil <span class="filter-count"></span></button>
+                    <button class="filter-btn" type="button">Consiglio <span class="filter-count"></span></button>
                     <div class="filter-menu" id="councilMenu">
                     </div>
                 </div>
                 <div class="filter-dropdown" id="partyDropdown">
-                    <button class="filter-btn" type="button">Parti <span class="filter-count"></span></button>
+                    <button class="filter-btn" type="button">Partito <span class="filter-count"></span></button>
                     <div class="filter-menu" id="partyMenu">
                     </div>
                 </div>
-                <button class="filter-reset" id="resetFilters" title="Réinitialiser les filtres">↻</button>
+                <button class="filter-reset" id="resetFilters" title="Ripristinare i filtri">↻</button>
             </div>
         </section>
 
         <section class="results-section">
             <div class="results-header">
-                <span id="resultsCount">Chargement...</span>
+                <span id="resultsCount">Caricamento...</span>
                 <span id="lastUpdate"></span>
             </div>
             <div id="results" class="results-grid">
@@ -75,14 +75,14 @@
 
     <footer>
         <div class="container">
-            <p>Données: <a href="https://ws-old.parlament.ch/" target="_blank">API du Parlement suisse</a></p>
-            <p>Source: <a href="https://github.com/ArnaudBon20/EFK_CDF_Parlement" target="_blank">GitHub</a></p>
-            <p class="feedback-box"><a href="mailto:arnaud.bonvin@efk.admin.ch">Feedback ?</a></p>
+            <p>Dati: <a href="https://ws-old.parlament.ch/" target="_blank">API del Parlamento svizzero</a></p>
+            <p>Fonte: <a href="https://github.com/ArnaudBon20/EFK_CDF_Parlement" target="_blank">GitHub</a></p>
+            <p class="feedback-box"><a href="mailto:arnaud.bonvin@efk.admin.ch">Feedback?</a></p>
         </div>
     </footer>
 
-    <button id="scrollTopBtn" class="scroll-top-btn" title="Retour en haut">↑</button>
-    <script src="debates.js"></script>
+    <button id="scrollTopBtn" class="scroll-top-btn" title="Torna in alto">↑</button>
+    <script src="debates_it.js"></script>
     <script>
         const scrollBtn = document.getElementById('scrollTopBtn');
         window.addEventListener('scroll', () => {
